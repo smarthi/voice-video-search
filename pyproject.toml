@@ -1,0 +1,54 @@
+[project]
+name = "video-voice-search"
+version = "0.1.0"
+description = "CPU-only, offline voice-queried video frame retrieval demo"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "av>=14.0.0",
+    "einops>=0.8.0",
+    "faiss-cpu>=1.10.0",
+    "faster-whisper>=1.1.1",
+    "gradio>=5.29.0",
+    "imageio-ffmpeg>=0.5.1",
+    "numpy>=2.2.0",
+    "open-clip-torch>=2.32.0",
+    "pillow>=11.1.0",
+    "pydantic>=2.11.0",
+    "pydantic-settings>=2.8.0",
+    "qwen-vl-utils>=0.0.14",
+    "rapidocr-onnxruntime>=1.4.4",
+    "sentence-transformers>=4.1.0",
+    "torch>=2.6.0",
+    "torchvision>=0.21.0",
+    "yt-dlp>=2025.3.31",
+]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.11.0"]
+qdrant = ["qdrant-client>=1.12.0"]
+
+[project.scripts]
+vvs = "vvs.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vvs"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/vvs/ui/theme.css" = "vvs/ui/theme.css"
+
+[tool.uv]
+package = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }

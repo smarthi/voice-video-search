@@ -1,0 +1,305 @@
+{
+  "video_id": "nqye02H_H6I",
+  "source": "https://www.youtube.com/watch?v=nqye02H_H6I",
+  "title": "4K Relaxing Nature Sounds - Short Video Clips of Nature",
+  "duration_s": 58.0,
+  "video_path": "/home/smarthi/video-voice-search/data/nqye02H_H6I/video.mp4",
+  "frames": [
+    {
+      "index": 0,
+      "t_s": 1.917,
+      "path": "/home/smarthi/video-voice-search/data/nqye02H_H6I/frames/0000_00001.92s_shot000.jpg",
+      "hash_hex": "fc40f830f810f982f891fd01f901fc016701f704fb80ff80ff81ff80bf827fa1",
+      "shot_id": 0,
+      "motion_energy": 0.0014,
+      "flash_energy": 0.0004
+    },
+    {
+      "index": 1,
+      "t_s": 8.583,
+      "path": "/home/smarthi/video-voice-search/data/nqye02H_H6I/frames/0001_00008.58s_shot001.jpg",
+      "hash_hex": "7889f89119d980990c8d0e0c06494b4dcb47c3d3d3d307ce86d846d8cf5ccf5c",
+      "shot_id": 1,
+      "motion_energy": 0.0003,
+      "flash_energy": 0.0002
+    },
+    {
+      "index": 2,
+      "t_s": 14.833,
+      "path": "/home/smarthi/video-voice-search/data/nqye02H_H6I/frames/0002_00014.83s_shot002.jpg",
+      "hash_hex": "d6d2f2907313336c714c61bc6cb848ae41cf715b7a6db62cf229f212f4117d73",
+      "shot_id": 2,
+      "motion_energy": 0.0047,
+      "flash_energy": 0.0011
+    },
+    {
+      "index": 3,
+      "t_s": 21.083,
+      "path": "/home/smarthi/video-voice-search/data/nqye02H_H6I/frames/0003_00021.08s_shot003.jpg",
+      "hash_hex": "22a3403188128b0b4b0b4b15430ddb8dc9c943e9c1c9a1e9a2e1e2f3c3c3f3ca",
+      "shot_id": 3,
+      "motion_energy": 0.0009,
+      "flash_energy": 0.0002
+    },
+    {
+      "index": 4,
+      "t_s": 27.375,
+      "path": "/home/smarthi/video-voice-search/data/nqye02H_H6I/frames/0004_00027.38s_shot004.jpg",
+      "hash_hex": "b7bca79c279ca71c679a6b1a6b5f175d9e1cce0e9e86fbe3fe71ee78dc78fc78",
+      "shot_id": 4,
+      "motion_energy": 0.0016,
+      "flash_energy": 0.0006
+    },
+    {
+      "index": 5,
+      "t_s": 33.792,
+      "path": "/home/smarthi/video-voice-search/data/nqye02H_H6I/frames/0005_00033.79s_shot005.jpg",
+      "hash_hex": "d1c5db85870187868cb39c533dc605cc05c801f809ec0765e435b1366916ad5e",
+      "shot_id": 5,
+      "motion_energy": 0.0017,
+      "flash_energy": 0.0001
+    },
+    {
+      "index": 6,
+      "t_s": 39.833,
+      "path": "/home/smarthi/video-voice-search/data/nqye02H_H6I/frames/0006_00039.83s_shot006.jpg",
+      "hash_hex": "5e083e1038007e207c10f8007e00de007e001f009f031f135d127e14be01bc00",
+      "shot_id": 6,
+      "motion_energy": 0.0047,
+      "flash_energy": 0.0
+    },
+    {
+      "index": 7,
+      "t_s": 45.875,
+      "path": "/home/smarthi/video-voice-search/data/nqye02H_H6I/frames/0007_00045.88s_shot007.jpg",
+      "hash_hex": "e780e380e780bf803d8039803984bd8c3b4436607c6c273c339513e6e7edf7c8",
+      "shot_id": 7,
+      "motion_energy": 0.002,
+      "flash_energy": 0.0009
+    },
+    {
+      "index": 8,
+      "t_s": 52.667,
+      "path": "/home/smarthi/video-voice-search/data/nqye02H_H6I/frames/0008_00052.67s_shot008.jpg",
+      "hash_hex": "2301e200933093329b249b0699339f139f13971bc61ec61cee1ebe3e7a636313",
+      "shot_id": 8,
+      "motion_energy": 0.0061,
+      "flash_energy": 0.0
+    }
+  ],
+  "transcript": [],
+  "ocr": [],
+  "scenes": [
+    {
+      "scene_id": 0,
+      "start_s": 1.917,
+      "end_s": 8.583,
+      "frame_index": 0,
+      "path": "/home/smarthi/video-voice-search/data/nqye02H_H6I/frames/0000_00001.92s_shot000.jpg",
+      "caption": "A clear, rushing stream flows through a rocky, forested valley, with lush green trees and foliage surrounding the water.",
+      "objects": [
+        "stream",
+        "rocks",
+        "trees",
+        "foliage",
+        "valley"
+      ],
+      "model": "Qwen/Qwen3-VL-2B-Instruct"
+    },
+    {
+      "scene_id": 1,
+      "start_s": 8.583,
+      "end_s": 14.833,
+      "frame_index": 1,
+      "path": "/home/smarthi/video-voice-search/data/nqye02H_H6I/frames/0001_00008.58s_shot001.jpg",
+      "caption": "A close-up of a branch with water droplets on its green needles, set against a soft-focus green background.  \nBranch, water droplet, needle, green, background",
+      "objects": [],
+      "model": "Qwen/Qwen3-VL-2B-Instruct"
+    },
+    {
+      "scene_id": 2,
+      "start_s": 14.833,
+      "end_s": 21.083,
+      "frame_index": 2,
+      "path": "/home/smarthi/video-voice-search/data/nqye02H_H6I/frames/0002_00014.83s_shot002.jpg",
+      "caption": "A close-up of green foliage with water droplets on the leaves, suggesting a wet, natural environment.",
+      "objects": [
+        "grass",
+        "leaves",
+        "water droplets"
+      ],
+      "model": "Qwen/Qwen3-VL-2B-Instruct"
+    },
+    {
+      "scene_id": 3,
+      "start_s": 21.083,
+      "end_s": 27.375,
+      "frame_index": 3,
+      "path": "/home/smarthi/video-voice-search/data/nqye02H_H6I/frames/0003_00021.08s_shot003.jpg",
+      "caption": "A serene pond surrounded by lush greenery and trees, with their reflections shimmering on the water's surface.",
+      "objects": [
+        "pond",
+        "trees",
+        "reeds",
+        "foliage",
+        "reflection"
+      ],
+      "model": "Qwen/Qwen3-VL-2B-Instruct"
+    },
+    {
+      "scene_id": 4,
+      "start_s": 27.375,
+      "end_s": 33.792,
+      "frame_index": 4,
+      "path": "/home/smarthi/video-voice-search/data/nqye02H_H6I/frames/0004_00027.38s_shot004.jpg",
+      "caption": "A serene forest stream flows gently over moss-covered rocks, surrounded by lush green trees and dappled sunlight.",
+      "objects": [
+        "stream",
+        "rocks",
+        "trees",
+        "moss",
+        "sunlight"
+      ],
+      "model": "Qwen/Qwen3-VL-2B-Instruct"
+    },
+    {
+      "scene_id": 5,
+      "start_s": 33.792,
+      "end_s": 39.833,
+      "frame_index": 5,
+      "path": "/home/smarthi/video-voice-search/data/nqye02H_H6I/frames/0005_00033.79s_shot005.jpg",
+      "caption": "A close-up of a lush green tree branch with raindrops on the leaves, showing small buds and dark berries.  \nBranch, leaf, raindrop, berry, tree, green, wet, foliage, background, blur, natural, outdoor, nature, plant, leaf, branch, berry, rain, wet, green, leaf, leaf, leaf, leaf, leaf, leaf, leaf, leaf",
+      "objects": [],
+      "model": "Qwen/Qwen3-VL-2B-Instruct"
+    },
+    {
+      "scene_id": 6,
+      "start_s": 39.833,
+      "end_s": 45.875,
+      "frame_index": 6,
+      "path": "/home/smarthi/video-voice-search/data/nqye02H_H6I/frames/0006_00039.83s_shot006.jpg",
+      "caption": "A clear, shallow stream flows gently through a lush, green forest, with rocks and foliage lining the banks.",
+      "objects": [
+        "stream",
+        "rocks",
+        "trees",
+        "foliage",
+        "water",
+        "forest"
+      ],
+      "model": "Qwen/Qwen3-VL-2B-Instruct"
+    },
+    {
+      "scene_id": 7,
+      "start_s": 45.875,
+      "end_s": 52.667,
+      "frame_index": 7,
+      "path": "/home/smarthi/video-voice-search/data/nqye02H_H6I/frames/0007_00045.88s_shot007.jpg",
+      "caption": "A serene sunset over a rocky shoreline with the sun setting behind distant hills, casting warm orange and gold hues across the water and sky, with silhouetted leaves in the foreground.",
+      "objects": [
+        "sea",
+        "rocks",
+        "sun",
+        "hills",
+        "tree",
+        "water",
+        "sky"
+      ],
+      "model": "Qwen/Qwen3-VL-2B-Instruct"
+    },
+    {
+      "scene_id": 8,
+      "start_s": 52.667,
+      "end_s": 58.0,
+      "frame_index": 8,
+      "path": "/home/smarthi/video-voice-search/data/nqye02H_H6I/frames/0008_00052.67s_shot008.jpg",
+      "caption": "A bee is visiting a vibrant red flowering tree in a close-up shot.  \nFlowers, bee, tree, branch, petals, yellow stamens, green leaves, white background",
+      "objects": [],
+      "model": "Qwen/Qwen3-VL-2B-Instruct"
+    }
+  ],
+  "shots": [
+    {
+      "shot_id": 0,
+      "start_s": 0.0,
+      "end_s": 7.125,
+      "start_frame": 0,
+      "end_frame": 169
+    },
+    {
+      "shot_id": 1,
+      "start_s": 7.125,
+      "end_s": 13.292,
+      "start_frame": 171,
+      "end_frame": 317
+    },
+    {
+      "shot_id": 2,
+      "start_s": 13.292,
+      "end_s": 19.667,
+      "start_frame": 319,
+      "end_frame": 470
+    },
+    {
+      "shot_id": 3,
+      "start_s": 19.667,
+      "end_s": 25.75,
+      "start_frame": 472,
+      "end_frame": 616
+    },
+    {
+      "shot_id": 4,
+      "start_s": 25.75,
+      "end_s": 32.292,
+      "start_frame": 618,
+      "end_frame": 773
+    },
+    {
+      "shot_id": 5,
+      "start_s": 32.292,
+      "end_s": 38.542,
+      "start_frame": 775,
+      "end_frame": 923
+    },
+    {
+      "shot_id": 6,
+      "start_s": 38.542,
+      "end_s": 44.417,
+      "start_frame": 925,
+      "end_frame": 1064
+    },
+    {
+      "shot_id": 7,
+      "start_s": 44.417,
+      "end_s": 50.583,
+      "start_frame": 1066,
+      "end_frame": 1212
+    },
+    {
+      "shot_id": 8,
+      "start_s": 50.583,
+      "end_s": 58.0,
+      "start_frame": 1214,
+      "end_frame": 1392
+    }
+  ],
+  "slide_heavy": false,
+  "channels": {
+    "visual": true,
+    "transcript": false,
+    "ocr": false,
+    "asr": false,
+    "scene": true,
+    "vector_backend": "faiss"
+  },
+  "models": {
+    "clip": "Qwen/Qwen3-VL-Embedding-2B",
+    "asr": "skipped (no audio track)",
+    "text": "BAAI/bge-small-en-v1.5",
+    "ocr": null,
+    "caption": "Qwen/Qwen3-VL-2B-Instruct",
+    "shot": "TransNetV2",
+    "visual_dim": 2048
+  },
+  "vector_backend": "faiss"
+}

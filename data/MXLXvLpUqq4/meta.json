@@ -1,0 +1,110 @@
+{
+  "video_id": "MXLXvLpUqq4",
+  "source": "https://www.youtube.com/watch?v=MXLXvLpUqq4&list=PL4Gr5tOAPttJ247vzkv1ZbUEm_YtKLejH&index=3",
+  "title": "4K Nature & Landscape from The Air | Free HD Video - No Copyright",
+  "duration_s": 45.0,
+  "video_path": "/home/smarthi/video-voice-search/data/MXLXvLpUqq4/video.mp4",
+  "frames": [
+    {
+      "index": 0,
+      "t_s": 2.0,
+      "path": "/home/smarthi/video-voice-search/data/MXLXvLpUqq4/frames/0000_00002.00s_shot000.jpg",
+      "hash_hex": "18d198c13c82fd267922f184d288c6295cc398e2986190f002e044d241d281ca",
+      "shot_id": 0,
+      "motion_energy": 0.0018,
+      "flash_energy": 0.0001
+    },
+    {
+      "index": 1,
+      "t_s": 10.0,
+      "path": "/home/smarthi/video-voice-search/data/MXLXvLpUqq4/frames/0001_00010.00s_shot000.jpg",
+      "hash_hex": "ce428e84c92049a0399031d0199039d0fd837b03f126b182ce8147129da099c5",
+      "shot_id": 0,
+      "motion_energy": 0.002,
+      "flash_energy": 0.0003
+    },
+    {
+      "index": 2,
+      "t_s": 18.0,
+      "path": "/home/smarthi/video-voice-search/data/MXLXvLpUqq4/frames/0002_00018.00s_shot000.jpg",
+      "hash_hex": "66c3264327242728970c9c499a58da58cc9259103920339031c279d069c27b00",
+      "shot_id": 0,
+      "motion_energy": 0.0044,
+      "flash_energy": 0.0038
+    },
+    {
+      "index": 3,
+      "t_s": 26.0,
+      "path": "/home/smarthi/video-voice-search/data/MXLXvLpUqq4/frames/0003_00026.00s_shot000.jpg",
+      "hash_hex": "9c04bc04b806da06de42fc13760366c34ec12e670f26054c954c92d9d2da59d1",
+      "shot_id": 0,
+      "motion_energy": 0.0023,
+      "flash_energy": 0.0001
+    },
+    {
+      "index": 4,
+      "t_s": 34.0,
+      "path": "/home/smarthi/video-voice-search/data/MXLXvLpUqq4/frames/0004_00034.00s_shot000.jpg",
+      "hash_hex": "7f327b303ee11de09f881b08360da42c8c0c38247824b0a69606fc12e603c6c3",
+      "shot_id": 0,
+      "motion_energy": 0.0032,
+      "flash_energy": 0.0009
+    },
+    {
+      "index": 5,
+      "t_s": 42.0,
+      "path": "/home/smarthi/video-voice-search/data/MXLXvLpUqq4/frames/0005_00042.00s_shot000.jpg",
+      "hash_hex": "fe033c835c463f4ebf4d3f093e4a3e53ff301f341ea03ee00bc01f1852083448",
+      "shot_id": 0,
+      "motion_energy": 0.0035,
+      "flash_energy": 0.0017
+    }
+  ],
+  "transcript": [],
+  "ocr": [],
+  "scenes": [
+    {
+      "scene_id": 0,
+      "start_s": 2.0,
+      "end_s": 45.0,
+      "frame_index": 3,
+      "path": "/home/smarthi/video-voice-search/data/MXLXvLpUqq4/frames/0003_00026.00s_shot000.jpg",
+      "caption": "An aerial view of a winding road snaking through a dense forest with a small building on a hillside nearby.",
+      "objects": [
+        "road",
+        "forest",
+        "building",
+        "hillside"
+      ],
+      "model": "Qwen/Qwen3-VL-2B-Instruct"
+    }
+  ],
+  "shots": [
+    {
+      "shot_id": 0,
+      "start_s": 0.0,
+      "end_s": 45.0,
+      "start_frame": 0,
+      "end_frame": 1110
+    }
+  ],
+  "slide_heavy": false,
+  "channels": {
+    "visual": true,
+    "transcript": false,
+    "ocr": false,
+    "asr": false,
+    "scene": true,
+    "vector_backend": "faiss"
+  },
+  "models": {
+    "clip": "Qwen/Qwen3-VL-Embedding-2B",
+    "asr": "skipped (no audio track)",
+    "text": "BAAI/bge-small-en-v1.5",
+    "ocr": null,
+    "caption": "Qwen/Qwen3-VL-2B-Instruct",
+    "shot": "TransNetV2",
+    "visual_dim": 2048
+  },
+  "vector_backend": "faiss"
+}

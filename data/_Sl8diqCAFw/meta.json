@@ -1,0 +1,72 @@
+{
+  "video_id": "_Sl8diqCAFw",
+  "source": "https://www.youtube.com/watch?v=_Sl8diqCAFw&list=PL4Gr5tOAPttJ247vzkv1ZbUEm_YtKLejH&index=1",
+  "title": "4K Planet Earth Spinning in Space | Free HD Videos - No Copyright",
+  "duration_s": 16.0,
+  "video_path": "/home/smarthi/video-voice-search/data/_Sl8diqCAFw/video.mp4",
+  "frames": [
+    {
+      "index": 0,
+      "t_s": 2.0,
+      "path": "/home/smarthi/video-voice-search/data/_Sl8diqCAFw/frames/0000_00002.00s_shot000.jpg",
+      "hash_hex": "c802d883d845d064c0e4c068e060e068e630e018e008e008e800e0006001e000",
+      "shot_id": 0
+    },
+    {
+      "index": 1,
+      "t_s": 10.0,
+      "path": "/home/smarthi/video-voice-search/data/_Sl8diqCAFw/frames/0001_00010.00s_shot000.jpg",
+      "hash_hex": "c841d841d013d038c018c038e018e19ce306e206e002e402e600e2006000e200",
+      "shot_id": 0
+    }
+  ],
+  "transcript": [],
+  "ocr": [],
+  "scenes": [
+    {
+      "scene_id": 0,
+      "start_s": 2.0,
+      "end_s": 16.0,
+      "frame_index": 1,
+      "path": "/home/smarthi/video-voice-search/data/_Sl8diqCAFw/frames/0001_00010.00s_shot000.jpg",
+      "caption": "A stunning view of Earth from space, showing the sun's bright light illuminating the planet's curved surface, with the night side glowing with city lights, particularly highlighting the illuminated regions of Asia.",
+      "objects": [
+        "earth",
+        "sun",
+        "city lights",
+        "night sky",
+        "continents",
+        "oceans"
+      ],
+      "model": "Qwen/Qwen3-VL-2B-Instruct"
+    }
+  ],
+  "shots": [
+    {
+      "shot_id": 0,
+      "start_s": 0.0,
+      "end_s": 16.0,
+      "start_frame": 0,
+      "end_frame": 399
+    }
+  ],
+  "slide_heavy": false,
+  "channels": {
+    "visual": true,
+    "transcript": false,
+    "ocr": false,
+    "asr": false,
+    "scene": true,
+    "vector_backend": "faiss"
+  },
+  "models": {
+    "clip": "Qwen/Qwen3-VL-Embedding-2B",
+    "asr": "skipped (no audio track)",
+    "text": "BAAI/bge-small-en-v1.5",
+    "ocr": null,
+    "caption": "Qwen/Qwen3-VL-2B-Instruct",
+    "shot": "TransNetV2",
+    "visual_dim": 2048
+  },
+  "vector_backend": "faiss"
+}

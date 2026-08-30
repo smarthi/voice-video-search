@@ -1,0 +1,539 @@
+"""Build and load a visual-first ANN index (FAISS POC / Qdrant prod)."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from pathlib import Path
+from time import perf_counter
+from typing import Any
+
+import numpy as np
+
+from vvs.config import load_settings
+from vvs.ingest import extract_video_id, ingest
+from vvs.media.caption import caption_scenes
+from vvs.media.frames import extract_keyframes
+from vvs.media.ocr import is_slide_heavy, ocr_frames
+from vvs.media.probe import has_audio_stream
+from vvs.media.scenes import cluster_scenes, drafts_from_shots
+from vvs.media.shots import detect_shots, extract_shot_keyframes
+from vvs.media.transcribe import transcribe
+from vvs.models import (
+    BuildResult,
+    ChannelFlags,
+    IndexMeta,
+    ModelCard,
+    SceneCard,
+    ShotSpan,
+    StageTimings,
+)
+from vvs.paths import (
+    DATA_ROOT,
+    index_path,
+    meta_path,
+    timings_path,
+    video_path,
+    visual_faiss_path,
+)
+from vvs.retrieve.embed import embed_bge_texts, embed_clip_images, visual_dim, visual_model_label
+from vvs.retrieve.store import VectorPayload, open_store, visual_store_exists
+
+StageCallback = Callable[[str], None]
+
+
+def should_run_asr(media: Path, *, force_mute: bool | None = None) -> bool:
+    """ASR only when the file has audio and mute is not forced (Sphere default)."""
+    if force_mute is None:
+        force_mute = load_settings().force_mute
+    if force_mute:
+        print("[index] ASR skipped: VVS_FORCE_MUTE / force_mute")
+        return False
+    try:
+        if not has_audio_stream(media):
+            print("[index] ASR skipped: no audio track")
+            return False
+    except Exception as exc:
+        print(f"[index] audio probe failed ({exc}); skipping ASR")
+        return False
+    return True
+
+
+def build_index(
+    source: str,
+    video_id: str | None = None,
+    *,
+    enable_ocr: bool = True,
+    force_mute: bool | None = None,
+    scene_caption: bool | None = None,
+    shot_detect: bool | None = None,
+    on_stage: StageCallback | None = None,
+) -> BuildResult:
+    def report(stage: str) -> None:
+        print(f"[index] stage={stage}")
+        if on_stage is not None:
+            on_stage(stage)
+
+    settings = load_settings()
+    want_scenes = settings.scene_caption if scene_caption is None else bool(scene_caption)
+    want_shots = settings.shot_detect if shot_detect is None else bool(shot_detect)
+    timings = StageTimings()
+    started = perf_counter()
+
+    report("ingest")
+    t0 = perf_counter()
+    ingest_info = ingest(source, dest_id=video_id)
+    timings.ingest_s = perf_counter() - t0
+    vid = ingest_info.video_id
+    media = Path(ingest_info.path)
+    print(f"[index] video_id={vid} path={media} backend={settings.vector_backend}")
+
+    shots: list[ShotSpan] = []
+    frames = []
+    if want_shots:
+        report("shots")
+        t0 = perf_counter()
+        try:
+            shots, motion_track = detect_shots(
+                media,
+                threshold=settings.shot_threshold,
+                duration_s=float(ingest_info.duration_s or 0.0),
+            )
+            frames = extract_shot_keyframes(
+                media,
+                vid,
+                shots,
+                max_gap_s=settings.shot_max_gap_s,
+                motion_track=motion_track,
+            )
+        except Exception as exc:
+            print(f"[shots] TransNetV2 failed ({exc}); falling back to 2 fps keyframes")
+            shots = []
+            frames = []
+        timings.shots_s = perf_counter() - t0
+    if not frames:
+        report("frames")
+        t0 = perf_counter()
+        frames = extract_keyframes(media, vid)
+        timings.frames_s = perf_counter() - t0
+
+    run_asr = should_run_asr(media, force_mute=force_mute)
+    segments = []
+    if run_asr:
+        report("asr")
+        t0 = perf_counter()
+        segments = transcribe(media)
+        timings.asr_s = perf_counter() - t0
+    else:
+        report("asr_skip")
+
+    ocr_obs = []
+    slide_heavy = False
+    if enable_ocr:
+        report("ocr")
+        t0 = perf_counter()
+        try:
+            ocr_obs = ocr_frames(frames)
+            slide_heavy = is_slide_heavy(ocr_obs, frames)
+        except Exception as exc:
+            print(f"[ocr] skipped: {exc}")
+        timings.ocr_s = perf_counter() - t0
+
+    report("visual")
+    t0 = perf_counter()
+    frame_vecs = embed_clip_images([frame.path for frame in frames], settings=settings)
+    timings.clip_embed_s = perf_counter() - t0
+
+    transcript_vecs = np.zeros((0, 384), dtype=np.float32)
+    if segments:
+        report("bge_transcript")
+        t0 = perf_counter()
+        transcript_vecs = embed_bge_texts([seg.text for seg in segments])
+        timings.bge_transcript_s = perf_counter() - t0
+
+    ocr_vecs = np.zeros((0, 384), dtype=np.float32)
+    if ocr_obs:
+        report("bge_ocr")
+        t0 = perf_counter()
+        ocr_vecs = embed_bge_texts([row.text for row in ocr_obs])
+        timings.bge_ocr_s = perf_counter() - t0
+
+    duration_s = float(ingest_info.duration_s or _duration(media, frames, segments))
+    scenes: list[SceneCard] = []
+    scene_vecs = np.zeros((0, 384), dtype=np.float32)
+    caption_model: str | None = None
+    if want_scenes:
+        report("scenes")
+        t0 = perf_counter()
+        if shots:
+            drafts = drafts_from_shots(frames, shots)
+            if not drafts:
+                drafts = cluster_scenes(frames, frame_vecs, duration_s=duration_s)
+        else:
+            drafts = cluster_scenes(frames, frame_vecs, duration_s=duration_s)
+        timings.scenes_s = perf_counter() - t0
+        report("caption")
+        t0 = perf_counter()
+        try:
+            scenes = caption_scenes(
+                frames,
+                drafts,
+                duration_s=duration_s,
+                model_name=settings.scene_caption_model,
+            )
+            caption_model = next((s.model for s in scenes if s.model), settings.scene_caption_model)
+        except Exception as exc:
+            print(f"[caption] skipped: {exc}")
+            scenes = []
+        timings.caption_s = perf_counter() - t0
+        if scenes:
+            report("bge_scene")
+            t0 = perf_counter()
+            scene_vecs = embed_bge_texts([scene.passage_text() for scene in scenes])
+            timings.bge_scene_s = perf_counter() - t0
+
+    report("save")
+    vdim = int(frame_vecs.shape[1]) if frame_vecs.size else visual_dim(settings=settings)
+    _write_stores(
+        vid,
+        settings=settings,
+        frames=frames,
+        frame_vecs=frame_vecs,
+        segments=segments,
+        transcript_vecs=transcript_vecs,
+        ocr_obs=ocr_obs,
+        ocr_vecs=ocr_vecs,
+        scenes=scenes,
+        scene_vecs=scene_vecs,
+    )
+    # Do not persist dense matrices. Drop local copies after the store write.
+    del frame_vecs, transcript_vecs, ocr_vecs, scene_vecs
+
+    meta = IndexMeta(
+        video_id=vid,
+        source=source,
+        title=ingest_info.title,
+        duration_s=duration_s,
+        video_path=str(media),
+        frames=frames,
+        transcript=segments,
+        ocr=ocr_obs,
+        scenes=scenes,
+        shots=shots,
+        slide_heavy=slide_heavy,
+        channels=ChannelFlags(
+            visual=True,
+            transcript=bool(segments),
+            ocr=bool(ocr_obs),
+            asr=bool(segments),
+            scene=bool(scenes),
+            vector_backend=settings.vector_backend,
+        ),
+        models=ModelCard(
+            clip=visual_model_label(settings=settings),
+            asr="faster-whisper small int8" if segments else "skipped (no audio track)",
+            text="BAAI/bge-small-en-v1.5",
+            ocr="rapidocr-onnxruntime" if ocr_obs else None,
+            caption=caption_model,
+            shot="TransNetV2" if shots else None,
+            visual_dim=vdim,
+        ),
+        vector_backend=settings.vector_backend,
+    )
+    meta_path(vid).write_text(meta.model_dump_json(indent=2), encoding="utf-8")
+    timings.total_s = perf_counter() - started
+    timings_path(vid).write_text(timings.model_dump_json(indent=2), encoding="utf-8")
+    print(f"[index] wrote FAISS stores and {meta_path(vid)}")
+    for name, value in timings.model_dump().items():
+        print(f"[timing] {name}: {value:.2f}s")
+    report("done")
+    return BuildResult(video_id=vid, meta=meta, timings=timings)
+
+
+def load_timings(video_id: str) -> StageTimings | None:
+    path = timings_path(video_id)
+    if not path.exists():
+        return None
+    return StageTimings.model_validate_json(path.read_text(encoding="utf-8"))
+
+
+_TIMING_LABELS = (
+    ("ingest_s", "ingest"),
+    ("frames_s", "keyframes"),
+    ("shots_s", "TransNetV2 shots"),
+    ("asr_s", "whisper"),
+    ("ocr_s", "ocr"),
+    ("scenes_s", "scenes"),
+    ("caption_s", "caption"),
+    ("clip_embed_s", "visual embed"),
+    ("bge_transcript_s", "BGE transcript"),
+    ("bge_ocr_s", "BGE OCR"),
+    ("bge_scene_s", "BGE scene"),
+    ("total_s", "total"),
+)
+
+
+def format_timings(timings: StageTimings) -> str:
+    parts: list[str] = []
+    for field, label in _TIMING_LABELS:
+        value = getattr(timings, field)
+        if value or field == "total_s":
+            parts.append(f"{label} {value:.1f}s")
+    return " · ".join(parts)
+
+
+def load_index(video_id: str) -> dict[str, Any]:
+    """Open mmap'd stores + metadata. Does not load embedding matrices into NumPy."""
+    if not visual_store_exists(video_id) and index_path(video_id).exists():
+        migrate_npz_to_faiss(video_id)
+    meta = IndexMeta.model_validate_json(meta_path(video_id).read_text(encoding="utf-8"))
+    settings = load_settings()
+    visual = open_store(
+        video_id, "visual", dim=visual_dim(meta=meta), settings=settings, create=False
+    )
+    # Store dim is source of truth (meta can lag after a crashed Qwen write).
+    if getattr(visual, "dim", 0) and meta.models.visual_dim != visual.dim:
+        meta.models.visual_dim = int(visual.dim)
+        if visual.dim != 512 and (
+            "open_clip" in (meta.models.clip or "").lower()
+            or "vit-b-32" in (meta.models.clip or "").lower()
+        ):
+            meta.models.clip = visual_model_label(settings=settings)
+        meta_path(video_id).write_text(meta.model_dump_json(indent=2), encoding="utf-8")
+        print(f"[index] healed {video_id} meta visual_dim={visual.dim}")
+    text = None
+    text_path = video_dir_text_exists(video_id)
+    if text_path:
+        text = open_store(video_id, "text", dim=384, settings=settings, create=False)
+    return {
+        "video_id": video_id,
+        "meta": meta,
+        "visual": visual,
+        "text": text,
+    }
+
+
+def video_dir_text_exists(video_id: str) -> bool:
+    root = Path(visual_faiss_path(video_id)).parent
+    return (root / "text.faiss").exists() and (root / "text.sqlite").exists()
+
+
+def migrate_npz_to_faiss(video_id: str) -> None:
+    """One-time move from the old in-memory npz into on-disk FAISS + SQLite."""
+    dest = index_path(video_id)
+    meta = IndexMeta.model_validate_json(meta_path(video_id).read_text(encoding="utf-8"))
+    print(f"[index] migrating {dest} → FAISS")
+    arrays = np.load(dest)
+    frame_vecs = np.asarray(arrays["frame_vecs"], dtype=np.float32)
+    transcript_vecs = np.asarray(arrays["transcript_vecs"], dtype=np.float32)
+    ocr_vecs = (
+        np.asarray(arrays["ocr_vecs"], dtype=np.float32)
+        if "ocr_vecs" in arrays.files
+        else np.zeros((0, 384), dtype=np.float32)
+    )
+    arrays.close()
+    _write_stores(
+        video_id,
+        settings=load_settings(),
+        frames=meta.frames,
+        frame_vecs=frame_vecs,
+        segments=meta.transcript,
+        transcript_vecs=transcript_vecs,
+        ocr_obs=meta.ocr,
+        ocr_vecs=ocr_vecs,
+        scenes=meta.scenes,
+        scene_vecs=np.zeros((0, 384), dtype=np.float32),
+    )
+    meta.channels.vector_backend = "faiss"
+    meta.vector_backend = "faiss"
+    if meta.transcript:
+        meta.channels.asr = True
+        meta.channels.transcript = True
+    meta_path(video_id).write_text(meta.model_dump_json(indent=2), encoding="utf-8")
+    print(f"[index] migrated {video_id}; vectors now live in FAISS (npz kept as backup)")
+
+
+def _write_stores(
+    vid: str,
+    *,
+    settings,
+    frames,
+    frame_vecs: np.ndarray,
+    segments,
+    transcript_vecs: np.ndarray,
+    ocr_obs,
+    ocr_vecs: np.ndarray,
+    scenes=(),
+    scene_vecs: np.ndarray | None = None,
+) -> None:
+    vdim = int(frame_vecs.shape[1]) if frame_vecs.size else visual_dim(settings=settings)
+    visual = open_store(vid, "visual", dim=vdim, settings=settings, create=True)
+    try:
+        visual.add(
+            frame_vecs,
+            [
+                VectorPayload(
+                    vector_id=0,
+                    asset_id=vid,
+                    t_s=frame.t_s,
+                    modality="video_frame",
+                    path=frame.path,
+                    frame_index=frame.index,
+                    shot_id=frame.shot_id,
+                    motion_energy=frame.motion_energy,
+                    flash_energy=frame.flash_energy,
+                )
+                for frame in frames
+            ],
+        )
+    finally:
+        visual.close()
+
+    text_payloads: list[VectorPayload] = []
+    text_rows: list[np.ndarray] = []
+    if segments and transcript_vecs.shape[0]:
+        for seg, vec in zip(segments, transcript_vecs, strict=False):
+            text_payloads.append(
+                VectorPayload(
+                    vector_id=0,
+                    asset_id=vid,
+                    t_s=seg.start_s,
+                    modality="transcript",
+                    path="",
+                    text=seg.text,
+                    frame_index=None,
+                )
+            )
+            text_rows.append(vec)
+    if ocr_obs and ocr_vecs.shape[0]:
+        for row, vec in zip(ocr_obs, ocr_vecs, strict=False):
+            text_payloads.append(
+                VectorPayload(
+                    vector_id=0,
+                    asset_id=vid,
+                    t_s=row.t_s,
+                    modality="ocr",
+                    path="",
+                    text=row.text,
+                    frame_index=row.frame_index,
+                )
+            )
+            text_rows.append(vec)
+    if scenes and scene_vecs is not None and scene_vecs.shape[0]:
+        for scene, vec in zip(scenes, scene_vecs, strict=False):
+            text_payloads.append(
+                VectorPayload(
+                    vector_id=0,
+                    asset_id=vid,
+                    t_s=scene.start_s,
+                    modality="scene",
+                    path=scene.path,
+                    text=scene.passage_text(),
+                    frame_index=scene.frame_index,
+                )
+            )
+            text_rows.append(vec)
+    if not text_payloads:
+        return
+    text = open_store(vid, "text", dim=384, settings=settings, create=True)
+    try:
+        text.add(np.vstack(text_rows), text_payloads)
+    finally:
+        text.close()
+
+
+def resolve_video_id(source: str | None, video_id: str | None) -> str:
+    if video_id:
+        return video_id
+    if source:
+        return extract_video_id(source)
+    raise SystemExit("Pass --video-id, --source, or set VVS_VIDEO_ID / VVS_SOURCE.")
+
+
+def index_exists(video_id: str) -> bool:
+    if not meta_path(video_id).exists():
+        return False
+    if visual_store_exists(video_id):
+        return True
+    return index_path(video_id).exists()
+
+
+def ensure_index(source: str | None, video_id: str | None, *, rebuild: bool = False) -> str:
+    vid = resolve_video_id(source, video_id)
+    if rebuild or not index_exists(vid):
+        if not source:
+            local = video_path(vid)
+            if not local.exists():
+                raise SystemExit(f"No index for {vid} and no --source to build from.")
+            source = str(local)
+        build_index(source, video_id=vid)
+    return vid
+
+
+def _duration(media: Path, frames, segments) -> float:
+    try:
+        import av
+
+        container = av.open(str(media))
+        stream = container.streams.video[0]
+        if stream.duration:
+            value = float(stream.duration * stream.time_base)
+            container.close()
+            return value
+        container.close()
+    except Exception:
+        pass
+    ends = [float(f.t_s) for f in frames] + [float(s.end_s) for s in segments]
+    return max(ends) if ends else 0.0
+
+
+def list_indexed() -> list[str]:
+    if not DATA_ROOT.exists():
+        return []
+    found: list[str] = []
+    for path in DATA_ROOT.iterdir():
+        if not path.is_dir():
+            continue
+        if index_exists(path.name):
+            found.append(path.name)
+    return sorted(found)
+
+
+def embed_counts(video_id: str) -> dict[str, Any]:
+    """How many vectors this index actually stored (visual = stills)."""
+    meta = IndexMeta.model_validate_json(meta_path(video_id).read_text(encoding="utf-8"))
+    visual = len(meta.frames)
+    text = len(meta.transcript) + len(meta.ocr) + len(meta.scenes)
+    return {
+        "video_id": video_id,
+        "duration_s": meta.duration_s,
+        "visual_embeddings": visual,
+        "shots": len(meta.shots),
+        "text_embeddings": text,
+        "transcript": len(meta.transcript),
+        "ocr": len(meta.ocr),
+        "scenes": len(meta.scenes),
+        "shot_detect": bool(meta.shots),
+    }
+
+
+def format_embed_counts(row: dict[str, Any]) -> str:
+    mode = "TransNetV2" if row["shot_detect"] else "2fps"
+    return (
+        f"{row['video_id']:24}  {mode:10}  "
+        f"visual={row['visual_embeddings']:<5}  shots={row['shots']:<4}  "
+        f"text={row['text_embeddings']:<5}  {row['duration_s']:.0f}s"
+    )
+
+
+def format_embed_compare(left: dict[str, Any], right: dict[str, Any]) -> str:
+    """left = baseline (no shots), right = TransNetV2."""
+    a, b = left["visual_embeddings"], right["visual_embeddings"]
+    if a <= 0:
+        saved = "n/a"
+    else:
+        saved = f"{a - b} fewer visual embeddings ({(a - b) / a * 100:.0f}% less)"
+    return (
+        f"{format_embed_counts(left)}\n"
+        f"{format_embed_counts(right)}\n"
+        f"compare visual: {a} → {b}  ·  {saved}"
+    )
