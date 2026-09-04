@@ -102,22 +102,30 @@ crash rather than a Python error — the message is the resource tracker's parti
 note, not the cause. Set `VVS_DEVICE=cpu` to confirm the GPU is implicated, then
 `VVS_VISUAL_DTYPE=float32` to test whether it is specifically half precision.
 
-**Why `opencv-python-headless`, and do not "fix" it back.** `rapidocr-onnxruntime`
-requires full `opencv-python`, which bundles `libavdevice`. PyAV bundles its own,
-and on macOS both register the same AVFoundation Objective-C classes into one
-process, which the ObjC runtime reports at `stage=ocr`:
+**Duplicate native libraries.** Two independent duplications bite this stack, and
+they are worth separating because only one of them is fatal.
 
-```
-objc[...]: Class AVFFrameReceiver is implemented in both .../av/.dylibs/libavdevice.62...
-           and .../cv2/.dylibs/libavdevice.61... One of the duplicates must be removed.
-```
+*OpenMP (fatal, mitigated).* `faiss-cpu` and `torch` each bundle their own LLVM
+OpenMP runtime — on macOS arm64, `faiss/.dylibs/libomp.dylib` and
+`torch/lib/libomp.dylib`. Whichever initializes second makes OpenMP abort the
+process, printing `OMP: Error #15` if you are lucky and just dying if you are
+not. This is why FAISS **search** could crash while indexing survived: search
+runs OpenMP-parallel, single-threaded writes do not. `vvs/__init__.py` sets
+`KMP_DUPLICATE_LIB_OK=TRUE` before torch or faiss is imported. That is the
+documented escape hatch and a mitigation, not a cure — the cure is a single
+OpenMP runtime, which needs wheel builds we do not control.
 
-It ends with "may cause spurious casting failures and mysterious crashes", and it
-means it. The headless wheel ships `libavcodec` and `libavformat` but **no
-`libavdevice`**, so the duplicate classes disappear. A `[tool.uv]
-override-dependencies` entry neutralises RapidOCR's pin. Nothing here opens an
-OpenCV window and RapidOCR only uses cv2 for array work, so headless costs
-nothing. Verify with `find .venv -name 'libavdevice*'` — exactly one hit, PyAV's.
+*FFmpeg / AVFoundation (noisy, not fatal).* PyAV and OpenCV each bundle
+`libavdevice`, which on macOS registers the ObjC classes `AVFFrameReceiver` and
+`AVFAudioReceiver`. Two copies means two registrations, and the runtime says so at
+`stage=ocr` where RapidOCR first imports cv2. It warns about "mysterious crashes",
+but in practice captioning and indexing run fine with the warning present, so
+treat it as noise until proven otherwise. Note that `opencv-python-headless` drops
+`libavdevice` **only on manylinux wheels** — the macOS wheels of both the full and
+headless builds still ship it, so the swap does not silence this on a Mac. We use
+headless anyway: nothing here opens an OpenCV window, RapidOCR only uses cv2 for
+array work, and it removes the duplicate on Linux. Eliminating it on macOS would
+mean running OCR out-of-process or dropping cv2 altogether.
 
 **Measured CPU cost (this laptop, 4 frames after warmup).** Qwen-VL-Embedding-2B
 28.3 s/frame; WeMM-Embedding-2B 72.8 s/frame — **2.6× slower** for the same

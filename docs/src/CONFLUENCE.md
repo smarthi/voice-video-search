@@ -200,24 +200,37 @@ different devices. The GPU matters more for captioning than for embedding:
 captioning is autoregressive, so a scene costs up to `QWEN_MAX_TOKENS` sequential
 forward passes where an embedding costs one.
 
-### 5.2 One FFmpeg per process
+### 5.2 Duplicate native runtimes
 
-`rapidocr-onnxruntime` requires full `opencv-python`, which bundles `libavdevice`
-alongside `libavcodec` and `libavformat`. PyAV bundles its own copy. On Linux the
-duplication is merely wasteful, but on macOS `libavdevice` registers the
-AVFoundation Objective-C classes `AVFFrameReceiver` and `AVFAudioReceiver`, and
-two copies in one process means two registrations of the same class name. The
-ObjC runtime reports this at `stage=ocr` — the point where RapidOCR first imports
-`cv2` — and warns that it "may cause spurious casting failures and mysterious
-crashes".
+Two independent library duplications affect this stack. They are worth keeping
+apart, because one is fatal and the other only looks alarming.
 
-The fix is `opencv-python-headless`, whose wheel ships `libavcodec` and
-`libavformat` but no `libavdevice`, so the duplicate classes cannot arise. A
-`[tool.uv] override-dependencies` entry neutralises RapidOCR's pin on the full
-build. Nothing in the POC opens an OpenCV window and RapidOCR uses cv2 only for
-array manipulation, so the headless wheel costs nothing. The invariant to hold is
-one `libavdevice` per environment; `find .venv -name 'libavdevice*'` should
-return exactly one path, PyAV's.
+**OpenMP — fatal, mitigated.** `faiss-cpu` and `torch` each bundle their own copy
+of the LLVM OpenMP runtime; on macOS arm64 these are `faiss/.dylibs/libomp.dylib`
+and `torch/lib/libomp.dylib`. Whichever initializes second causes OpenMP to abort
+the process. The failure is order-dependent and therefore looks capricious: FAISS
+**search** is an OpenMP-parallel path and crashed, while the largely
+single-threaded index write completed, so the same build appeared to index a
+video successfully and then die on the first query. `vvs/__init__.py` sets
+`KMP_DUPLICATE_LIB_OK=TRUE` before torch or faiss can be imported, which is the
+upstream-documented escape hatch. It is explicitly a mitigation. The real fix is
+a single OpenMP runtime in the process, which requires coordinated wheel builds
+outside our control, and is worth revisiting for the on-prem deployment where the
+container image is ours to define.
+
+**FFmpeg / AVFoundation — noisy, not fatal.** PyAV and OpenCV each bundle
+`libavdevice`, which on macOS registers the Objective-C classes
+`AVFFrameReceiver` and `AVFAudioReceiver`. Two copies in one process register the
+same class names twice, and the ObjC runtime reports it at `stage=ocr`, the point
+where RapidOCR first imports `cv2`. It warns of "spurious casting failures and
+mysterious crashes", but captioning, OCR and indexing all complete with the
+warning present, so it is treated as noise pending evidence otherwise. Note that
+`opencv-python-headless` omits `libavdevice` **only in the manylinux wheels**;
+both the full and headless macOS wheels still ship it, so the substitution does
+not silence this on a Mac. The POC uses the headless build regardless — nothing
+opens an OpenCV window, RapidOCR needs cv2 only for array manipulation, and it
+does remove the duplicate on Linux, which is what the on-prem containers run.
+Removing it on macOS would require running OCR out-of-process or replacing cv2.
 
 Measured on the prototype laptop (CPU, 4 frames after warmup), Qwen-VL-Embedding-2B
 costs **28.3 s/frame** against WeMM-Embedding-2B's **72.8 s/frame** — 2.6× slower
