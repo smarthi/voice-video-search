@@ -25,6 +25,7 @@ import numpy as np
 from PIL import Image
 
 from vvs.config import load_settings
+from vvs.device import force_cpu, resolve_device, resolve_dtype, torch_dtype
 
 QWEN_VL_2B = "Qwen/Qwen3-VL-Embedding-2B"
 QWEN_VL_8B = "Qwen/Qwen3-VL-Embedding-8B"
@@ -220,49 +221,6 @@ def _dim_from_name(name: str) -> int:
     return 2048
 
 
-_FORCED_CPU = False
-
-
-@lru_cache(maxsize=1)
-def resolve_device() -> str:
-    """Best available torch device. `VVS_DEVICE` wins if it is actually usable."""
-    import torch
-
-    if _FORCED_CPU:
-        return "cpu"
-    want = (os.environ.get("VVS_DEVICE") or "").strip().lower()
-    if want:
-        if want == "mps" and not torch.backends.mps.is_available():
-            print("[embed] VVS_DEVICE=mps but Metal is unavailable; using cpu")
-            return "cpu"
-        if want == "cuda" and not torch.cuda.is_available():
-            print("[embed] VVS_DEVICE=cuda but no CUDA device; using cpu")
-            return "cpu"
-        return want
-    if torch.backends.mps.is_available():
-        return "mps"
-    if torch.cuda.is_available():
-        return "cuda"
-    return "cpu"
-
-
-def resolve_dtype(device: str | None = None) -> str:
-    """Half precision on a GPU, full precision on CPU.
-
-    CPU fp16 is emulated and slower than fp32, so it is never chosen there.
-    `VVS_VISUAL_DTYPE` accepts float16 / bfloat16 / float32.
-    """
-    want = (os.environ.get("VVS_VISUAL_DTYPE") or "").strip().lower()
-    if want in {"float16", "fp16", "half"}:
-        return "float16"
-    if want in {"bfloat16", "bf16"}:
-        return "bfloat16"
-    if want in {"float32", "fp32", "full"}:
-        return "float32"
-    dev = device or resolve_device()
-    return "float32" if dev == "cpu" else "float16"
-
-
 def default_image_batch(device: str | None = None) -> int:
     """Frames per forward pass.
 
@@ -273,16 +231,6 @@ def default_image_batch(device: str | None = None) -> int:
     if override.isdigit() and int(override) > 0:
         return int(override)
     return 1 if (device or resolve_device()) == "cpu" else 8
-
-
-def _torch_dtype(name: str):
-    import torch
-
-    return {
-        "float16": torch.float16,
-        "bfloat16": torch.bfloat16,
-        "float32": torch.float32,
-    }[name]
 
 
 @lru_cache(maxsize=1)
@@ -320,7 +268,7 @@ def _sentence_transformer(model_id: str) -> object:
         # the choice also keeps hand-placed tensors (the CLIP path) on the same
         # device as the weights.
         print(f"[embed] {device} load failed ({type(exc).__name__}: {exc}); using cpu")
-        _force_cpu()
+        force_cpu()
         return _load_st(model_id, "cpu", resolve_dtype("cpu"))
 
 
@@ -332,7 +280,7 @@ def _load_st(model_id: str, device: str, dtype: str) -> object:
         model_id,
         device=device,
         trust_remote_code=True,
-        model_kwargs={"torch_dtype": _torch_dtype(dtype)},
+        model_kwargs={"torch_dtype": torch_dtype(dtype)},
     )
     if dtype != "float32" and not _probe_finite(model):
         # Half precision overflows in some VL stacks and yields NaN vectors,
@@ -340,13 +288,6 @@ def _load_st(model_id: str, device: str, dtype: str) -> object:
         print(f"[embed] {dtype} produced non-finite vectors; reloading in float32")
         model = _load_st(model_id, device, "float32")
     return model
-
-
-def _force_cpu() -> None:
-    global _FORCED_CPU
-
-    _FORCED_CPU = True
-    resolve_device.cache_clear()
 
 
 def _probe_finite(model) -> bool:

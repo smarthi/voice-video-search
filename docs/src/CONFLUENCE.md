@@ -133,7 +133,7 @@ Numbered pipeline:
 3. Stills — default 2 fps + dHash + 4 s floor, **or** TransNetV2 shots (one still per cut, plus an 8 s floor in long takes). Same decode writes `motion_energy` / `flash_energy` (64×36 L1 and luma jump). A luma spike force-keeps the frame so lightning is not dropped. The VLM still embeds one JPEG — it does not see N frames.
 4. Optional ASR — faster-whisper `small` int8 only when audio exists. Native Whisper segments, not fixed tiles.
 5. OCR — RapidOCR on kept JPEGs. This is the Sphere-relevant on-screen text channel.
-6. Optional X-Ray — stills clustered into scenes; **Qwen3-VL-2B-Instruct** captions the representative still (BLIP fallback; Florence-2 on request). Embedded with BGE as `modality="scene"`.
+6. Optional X-Ray — stills clustered into scenes; **Qwen3-VL-2B-Instruct** captions the representative still (BLIP fallback). Embedded with BGE as `modality="scene"`.
 7. Embed — **Qwen3-VL-Embedding-2B** on **one still** (2048-d, shared image/text space). BGE-small on OCR / transcript / captions (384-d). L2-normalized. CLIP ViT-B-32 (512-d) remains available for old indexes via `VVS_VISUAL_ENCODER=clip`. The official encode API also takes `{"video": frames, "fps", "max_frames"}` — **not used on this CPU box**. Later, on a GPU / larger server: one short window (~1 s, 6–8 frames) per kept still, same 2048-d collection. Do not smash the whole title into one vector.
 8. Vector store — two FAISS indexes **per video**, mmap’d from disk, plus SQLite payloads keyed by `vector_id`. Visual and text are separate spaces and are never mixed in one index. Do not smash CLIP 512 and Qwen 2048 into one FAISS file.
 9. Search — Qwen-VL (or CLIP) query vs each visual FAISS; BGE query vs each text FAISS; lexical IDF on ANN candidates; RRF **inside** a video; **archive merge by absolute ANN scores**; hydrate path / timestamp / quote / `asset_id` from SQLite.
@@ -174,7 +174,7 @@ two 2048-d families and must not be reintroduced.
 ### 5.1 Device selection
 
 The visual encoder dominates index time, so the device it lands on is the single
-biggest performance lever in the POC. `retrieve/embed.py` auto-detects: Metal
+biggest performance lever in the POC. `vvs/device.py` auto-detects: Metal
 (`mps`) on Apple Silicon, then CUDA, then CPU, with `VVS_DEVICE` as an override.
 Precision follows the device — fp16 on a GPU, fp32 on CPU, because CPU fp16 is
 emulated and slower than fp32. Batch width follows too: 8 frames per forward pass
@@ -194,6 +194,12 @@ non-zero; if fp16 has overflowed to NaN the model is rebuilt in fp32. Without
 that probe a half-precision overflow would write NaN vectors into an index and
 silently break retrieval rather than fail loudly.
 
+The captioner in `media/caption.py` shares that single decision rather than
+making its own, so the weights and the hand-placed input tensors cannot end up on
+different devices. The GPU matters more for captioning than for embedding:
+captioning is autoregressive, so a scene costs up to `QWEN_MAX_TOKENS` sequential
+forward passes where an embedding costs one.
+
 Measured on the prototype laptop (CPU, 4 frames after warmup), Qwen-VL-Embedding-2B
 costs **28.3 s/frame** against WeMM-Embedding-2B's **72.8 s/frame** — 2.6× slower
 for the same 2048-d output, with comparable text-query cost (9.8 s vs 10.2 s).
@@ -209,7 +215,7 @@ timestamp judgments exist, plus rank overlap, Spearman agreement and latency.
 | Visual (default) | `Qwen/Qwen3-VL-Embedding-2B` | auto (mps/cuda fp16, cpu fp32) | 2048 | Shared image/text space. Official VL embed sizes are **2B / 8B only** — there is no 4B VL embedder (`Qwen3-Embedding-4B` is text-only). `VVS_VISUAL_MODEL=qwen-vl-emb-4B` aliases to 2B and logs that. |
 | Visual (alternative) | `WeMM-Embedding-2B` (also 4B / 9B) | auto (mps/cuda fp16, cpu fp32) | 2048 / 2560 / 4096 | `VVS_VISUAL_ENCODER=wemm`. Uses `encode_query` / `encode_document` rather than Qwen's prompt argument. Matryoshka-trained, so `VVS_VISUAL_TRUNCATE_DIM` can shorten vectors to a supported width. |
 | Visual (legacy) | open_clip ViT-B-32 `laion2b_s34b_b79k` | auto | 512 | `VVS_VISUAL_ENCODER=clip`. Existing 512-d indexes still search. Switching encoder requires **Re-analyze**. |
-| Scene caption | `Qwen/Qwen3-VL-2B-Instruct` | CPU | — | Opt-in X-Ray. Different checkpoint from the embedder: Instruct writes English; Embedding only writes vectors. BLIP-base is the CPU fallback. Florence-2 via `VVS_SCENE_CAPTION_MODEL=florence2`. |
+| Scene caption | `Qwen/Qwen3-VL-2B-Instruct` | auto (shared with the embedder) | — | Opt-in X-Ray. Different checkpoint from the embedder: Instruct writes English; Embedding only writes vectors. BLIP-base is the fallback, taken once per run rather than once per scene. |
 | ASR | faster-whisper `small` int8 | CPU | — | Skipped when there is no audio track |
 | Text | BAAI/bge-small-en-v1.5 | CPU | 384 | `passage:` at index, `query:` at search (OCR + optional transcript + scene) |
 | OCR | rapidocr-onnxruntime | CPU | — | Off with `vvs index --no-ocr` |
@@ -451,7 +457,7 @@ uv run vvs app
 | Preload weights | `uv run vvs warm` |
 | List indexes | `uv run vvs list` |
 
-Env: `VVS_SOURCE`, `VVS_VIDEO_ID` (optional prefill), `VVS_DATA_DIR`, `VVS_VECTOR_BACKEND` (`faiss` or `qdrant`), `VVS_FAISS_INDEX_TYPE` (`hnsw` or `ivf_pq`), `VVS_QDRANT_URL`, `VVS_FORCE_MUTE`, `VVS_SHOT_DETECT`, `VVS_SCENE_CAPTION`, `VVS_SCENE_CAPTION_MODEL` (`qwen_vl` / `florence2` / `blip`), `VVS_VISUAL_ENCODER` (`qwen_vl` or `clip`), `VVS_VISUAL_MODEL`.
+Env: `VVS_SOURCE`, `VVS_VIDEO_ID` (optional prefill), `VVS_DATA_DIR`, `VVS_VECTOR_BACKEND` (`faiss` or `qdrant`), `VVS_FAISS_INDEX_TYPE` (`hnsw` or `ivf_pq`), `VVS_QDRANT_URL`, `VVS_FORCE_MUTE`, `VVS_SHOT_DETECT`, `VVS_SCENE_CAPTION`, `VVS_SCENE_CAPTION_MODEL` (`qwen_vl` / `blip`), `VVS_VISUAL_ENCODER` (`qwen_vl` or `clip`), `VVS_VISUAL_MODEL`, `VVS_DEVICE`, `VVS_VISUAL_DTYPE`, `VVS_VISUAL_BATCH`.
 
 Optional extra for a real Qdrant client: `uv sync --extra qdrant`.
 

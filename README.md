@@ -139,9 +139,9 @@ Mute video: visual + OCR + scene. No time-anchor boosts.
 
 That table is **inside one video**. The UI confidence badge is RRF / ceiling. Archive order uses `corpus_relevance` above, not that badge. Examples: `robotics` → Tolga ~3:01; `clips with a trumpet` → Careless Whisper / Jennifer Connelly saxophone still; `snow-covered mountains` → Roja; `moving tornado` prefers the high-motion still of the same funnel.
 
-**X-Ray scene cards.** The visual embedder does not write English. When captions are on, stills are grouped (TransNet shots if present, else embedding cosine / dHash, 24 s cap). **Qwen3-VL-2B-Instruct** captions the representative still and lists objects (`VVS_SCENE_CAPTION_MODEL=qwen_vl`). That is a second checkpoint from the embedder — Instruct generates text; Embedding only writes vectors. **BLIP-base** is the CPU fallback if Instruct fails. Florence-2 is still available via `VVS_SCENE_CAPTION_MODEL=florence2`. Cards live in `meta.json` and are BGE-embedded as `modality="scene"`. Query time only does a playhead lookup plus ANN — the captioner does not run again.
+**X-Ray scene cards.** The visual embedder does not write English. When captions are on, stills are grouped (TransNet shots if present, else embedding cosine / dHash, 24 s cap). **Qwen3-VL-2B-Instruct** captions the representative still and lists objects (`VVS_SCENE_CAPTION_MODEL=qwen_vl`). That is a second checkpoint from the embedder — Instruct generates text; Embedding only writes vectors. **BLIP-base** is the fallback if Instruct fails, and the run falls back **once** rather than once per scene. Cards live in `meta.json` and are BGE-embedded as `modality="scene"`. Query time only does a playhead lookup plus ANN — the captioner does not run again.
 
-Florence (if selected) uses the **native** `Florence2ForConditionalGeneration` in transformers 5 (`florence-community/Florence-2-base`). Do not use Microsoft’s old `trust_remote_code` config: transformers 5.x raises `'Florence2LanguageConfig' object has no attribute 'forced_bos_token_id'`. If the chosen captioner cannot load, the run falls back to BLIP **once** (not once per scene).
+Captioning uses the same device and precision as the embedder (see **Device** above), which matters more here than anywhere else: captioning is autoregressive, so each scene costs up to `QWEN_MAX_TOKENS` sequential forward passes rather than the single pass an embedding needs. If a caption model fails to load on the GPU, the session pins itself to CPU exactly as the encoder does.
 
 **TransNetV2 shots.** Mute Sphere video does not need a visual vector every 2 fps. TransNetV2 finds hard cuts on 48×27 frames (PyAV, no ffmpeg CLI). Each shot keeps one still, plus another every `VVS_SHOT_MAX_GAP_S` (default 8 s) so a long take is not a single embedding. The same 48×27 stack yields `motion_energy` / `flash_energy`; luma spikes add extra stills so lightning is not dropped. `shot_id` is stored on the keyframe and in the FAISS payload for citations. Mute clips use the shot span, not ±2 s around a keyframe. If TransNetV2 fails, analyze falls back to the 2 fps path.
 
@@ -160,7 +160,7 @@ uv sync
 # uv sync --extra qdrant
 ```
 
-Needs Python 3.12+, `uv`, ~8 GB RAM (Qwen-VL embedding 2B is heavier than CLIP; Instruct captioning loads a second 2B VL). First run needs network for Qwen-VL Embedding / BGE / RapidOCR, plus Whisper (if audio), TransNetV2, and Qwen3-VL-Instruct (or Florence/BLIP) if captions are on. After that, query is offline. CLIP indexes built before this swap still search; new analyzes use Qwen-VL.
+Needs Python 3.12+, `uv`, ~8 GB RAM (Qwen-VL embedding 2B is heavier than CLIP; Instruct captioning loads a second 2B VL). First run needs network for Qwen-VL Embedding / BGE / RapidOCR, plus Whisper (if audio), TransNetV2, and Qwen3-VL-Instruct (or BLIP) if captions are on. After that, query is offline. CLIP indexes built before this swap still search; new analyzes use Qwen-VL.
 
 ### Live demo UI
 
@@ -337,7 +337,7 @@ Commands: `uv run vvs index|query|app|warm|list`.
 | `VVS_QDRANT_SHARDS` | Prod shard count for `hash(asset_id) % N` (default 8) |
 | `VVS_FORCE_MUTE` | Skip Whisper even if the file has audio |
 | `VVS_SCENE_CAPTION` | Caption visual scenes at analyze (X-Ray metadata) |
-| `VVS_SCENE_CAPTION_MODEL` | `qwen_vl` (default, Qwen3-VL-2B-Instruct), `florence2`, or `blip` |
+| `VVS_SCENE_CAPTION_MODEL` | `qwen_vl` (default, Qwen3-VL-2B-Instruct) or `blip` |
 | `VVS_SHOT_DETECT` | TransNetV2 shot grouping; embed representatives only |
 | `VVS_SHOT_THRESHOLD` | Cut threshold (default `0.5`) |
 | `VVS_SHOT_MAX_GAP_S` | Extra still every N seconds inside a long shot (default `8`) |

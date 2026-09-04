@@ -136,7 +136,7 @@ def test_parse_qwen_caption_splits_objects() -> None:
     assert parse_qwen_caption("")[0] == "A video frame."
     assert _want_qwen("qwen_vl")
     assert _want_qwen("qwen/qwen3-vl-2b-instruct")
-    assert not _want_qwen("florence2")
+    assert not _want_qwen("blip")
 
 
 if __name__ == "__main__":

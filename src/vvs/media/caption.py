@@ -1,7 +1,6 @@
 """Ingest-only scene captioner. Query time never loads this model.
 
 Primary: Qwen3-VL-2B-Instruct (caption + object list). Fallback: BLIP-base.
-Florence-2 remains available via VVS_SCENE_CAPTION_MODEL=florence2.
 """
 
 from __future__ import annotations
@@ -13,23 +12,20 @@ from pathlib import Path
 from PIL import Image
 
 from vvs.config import load_settings
+from vvs.device import force_cpu, resolve_device, resolve_dtype, to_device, torch_dtype
 from vvs.media.scenes import SceneDraft, drafts_to_cards
 from vvs.models import Keyframe, SceneCard
 
 QWEN_CAPTION_ID = "Qwen/Qwen3-VL-2B-Instruct"
-FLORENCE_ID = "microsoft/Florence-2-base"
-FLORENCE_NATIVE_ID = "florence-community/Florence-2-base"
 BLIP_ID = "Salesforce/blip-image-captioning-base"
 MAX_SIDE = 768
 CAPTION_MAX_TOKENS = 32
 QWEN_MAX_TOKENS = 80
-OD_MAX_TOKENS = 64
 _CAPTION_PROMPT = (
     "Describe this video frame in one short English sentence. "
     "Then on a new line write Objects: comma-separated notable objects."
 )
 _qwen_disabled: str | None = None
-_florence_disabled: str | None = None
 
 
 CaptionFn = Callable[[str], tuple[str, list[str], str]]
@@ -63,7 +59,7 @@ def caption_scenes(
 
 def caption_image(path: str | Path, *, model_name: str | None = None) -> tuple[str, list[str], str]:
     """Return (caption, objects, model_id) for one still."""
-    global _florence_disabled, _qwen_disabled
+    global _qwen_disabled
     preferred = (model_name or load_settings().scene_caption_model or "qwen_vl").strip()
     image = _open_fit(path)
     key = preferred.lower().replace("_", "-")
@@ -73,13 +69,6 @@ def caption_image(path: str | Path, *, model_name: str | None = None) -> tuple[s
         except Exception as exc:
             _qwen_disabled = str(exc)
             print(f"[caption] Qwen-VL Instruct failed ({exc}); falling back to BLIP for this run")
-            return _blip_caption(image)
-    if key in {"florence2", "florence", "florence-2"} and _florence_disabled is None:
-        try:
-            return _florence_caption(image)
-        except Exception as exc:
-            _florence_disabled = str(exc)
-            print(f"[caption] Florence-2 failed ({exc}); falling back to BLIP for this run")
     return _blip_caption(image)
 
 
@@ -118,19 +107,30 @@ def parse_qwen_caption(text: str) -> tuple[str, list[str]]:
 
 @lru_cache(maxsize=1)
 def _qwen_bundle():
-    import torch
     from transformers import AutoModelForImageTextToText, AutoProcessor
 
-    print(f"[caption] loading {QWEN_CAPTION_ID} (CPU, Qwen3-VL Instruct)")
     processor = AutoProcessor.from_pretrained(QWEN_CAPTION_ID)
-    model = AutoModelForImageTextToText.from_pretrained(
-        QWEN_CAPTION_ID,
-        dtype=torch.float32,
-        low_cpu_mem_usage=True,
-    )
-    model.to("cpu")
-    model.eval()
-    return model, processor
+
+    def load(device: str, dtype: str):
+        print(f"[caption] loading {QWEN_CAPTION_ID} ({device}, {dtype}, Qwen3-VL Instruct)")
+        model = AutoModelForImageTextToText.from_pretrained(
+            QWEN_CAPTION_ID,
+            dtype=torch_dtype(dtype),
+            low_cpu_mem_usage=True,
+        )
+        model.to(device)
+        model.eval()
+        return model
+
+    device = resolve_device()
+    try:
+        return load(device, resolve_dtype(device)), processor
+    except Exception as exc:
+        if device == "cpu":
+            raise
+        print(f"[caption] {device} load failed ({type(exc).__name__}: {exc}); using cpu")
+        force_cpu()
+        return load("cpu", resolve_dtype("cpu")), processor
 
 
 def _qwen_caption(image: Image.Image) -> tuple[str, list[str], str]:
@@ -168,12 +168,13 @@ def _qwen_caption(image: Image.Image) -> tuple[str, list[str], str]:
             padding=True,
             return_tensors="pt",
         )
-    inputs = {key: value.to("cpu") if hasattr(value, "to") else value for key, value in inputs.items()}
+    inputs = to_device(inputs, resolve_device())
     with torch.no_grad():
         generated = model.generate(
             **inputs,
             max_new_tokens=QWEN_MAX_TOKENS,
             do_sample=False,
+            use_cache=True,
         )
     in_len = int(inputs["input_ids"].shape[1])
     trimmed = generated[:, in_len:]
@@ -185,109 +186,23 @@ def _qwen_caption(image: Image.Image) -> tuple[str, list[str], str]:
 
 
 @lru_cache(maxsize=1)
-def _florence_bundle():
-    """Load native transformers Florence-2 (no trust_remote_code).
-
-    microsoft/Florence-2-base ships old remote modeling that crashes on
-    transformers 5.x (`forced_bos_token_id`). Use Florence2ForConditionalGeneration
-    and the community conversion if the hub config is still the legacy one.
-    """
-    import torch
-    from transformers import Florence2ForConditionalGeneration, Florence2Processor
-
-    last: Exception | None = None
-    for model_id in (FLORENCE_NATIVE_ID, FLORENCE_ID):
-        print(f"[caption] loading {model_id} (CPU, native Florence-2)")
-        try:
-            model = Florence2ForConditionalGeneration.from_pretrained(
-                model_id,
-                dtype=torch.float32,
-                attn_implementation="eager",
-                trust_remote_code=False,
-            )
-            processor = Florence2Processor.from_pretrained(model_id, trust_remote_code=False)
-            model.eval()
-            return model, processor, model_id
-        except Exception as exc:
-            last = exc
-            print(f"[caption] {model_id} failed ({exc})")
-            try:
-                model = Florence2ForConditionalGeneration.from_pretrained(
-                    model_id, torch_dtype=torch.float32, trust_remote_code=False
-                )
-                processor = Florence2Processor.from_pretrained(model_id, trust_remote_code=False)
-                model.eval()
-                return model, processor, model_id
-            except Exception as exc2:
-                last = exc2
-                print(f"[caption] {model_id} retry failed ({exc2})")
-    raise RuntimeError(f"Could not load Florence-2: {last}") from last
-
-
-@lru_cache(maxsize=1)
 def _blip_bundle():
     from transformers import BlipForConditionalGeneration, BlipProcessor
 
-    print(f"[caption] loading {BLIP_ID} (CPU)")
+    device = resolve_device()
+    print(f"[caption] loading {BLIP_ID} ({device})")
     processor = BlipProcessor.from_pretrained(BLIP_ID)
     model = BlipForConditionalGeneration.from_pretrained(BLIP_ID)
+    model.to(device)
     model.eval()
     return model, processor
-
-
-def _florence_caption(image: Image.Image) -> tuple[str, list[str], str]:
-    caption = _florence_task(image, "<CAPTION>", CAPTION_MAX_TOKENS)
-    objects: list[str] = []
-    try:
-        od = _florence_task(image, "<OD>", OD_MAX_TOKENS, raw=True)
-        if isinstance(od, dict):
-            labels = od.get("labels") or []
-            objects = _unique_labels(labels)
-    except Exception as exc:
-        print(f"[caption] Florence OD skipped: {exc}")
-    text = caption.strip() or "A video frame."
-    _model, _processor, model_id = _florence_bundle()
-    return text, objects, model_id
-
-
-def _florence_task(
-    image: Image.Image,
-    task: str,
-    max_new_tokens: int,
-    *,
-    raw: bool = False,
-) -> str | dict:
-    import torch
-
-    model, processor, _model_id = _florence_bundle()
-    inputs = processor(text=task, images=image, return_tensors="pt")
-    gen_kwargs = dict(max_new_tokens=max_new_tokens, num_beams=1, do_sample=False)
-    with torch.no_grad():
-        try:
-            generated = model.generate(**inputs, **gen_kwargs)
-        except TypeError:
-            generated = model.generate(
-                input_ids=inputs["input_ids"],
-                pixel_values=inputs.get("pixel_values"),
-                **gen_kwargs,
-            )
-    decoded = processor.batch_decode(generated, skip_special_tokens=False)[0]
-    parsed = processor.post_process_generation(
-        decoded, task=task, image_size=(image.width, image.height)
-    )
-    value = parsed.get(task, parsed)
-    if raw:
-        return value if isinstance(value, dict) else {}
-    if isinstance(value, dict):
-        return str(value.get("caption") or value.get("text") or "").strip()
-    return str(value).strip()
 
 
 def _blip_caption(image: Image.Image) -> tuple[str, list[str], str]:
     import torch
 
     model, processor = _blip_bundle()
-    inputs = processor(images=image, return_tensors="pt")
+    inputs = to_device(processor(images=image, return_tensors="pt"), resolve_device())
     with torch.no_grad():
         out = model.generate(**inputs, max_new_tokens=CAPTION_MAX_TOKENS, num_beams=1)
     text = processor.decode(out[0], skip_special_tokens=True).strip()

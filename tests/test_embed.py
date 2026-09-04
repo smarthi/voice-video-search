@@ -206,11 +206,11 @@ def test_image_batch_env_override() -> None:
 def test_dtype_names_map_to_real_torch_dtypes() -> None:
     import torch
 
-    from vvs.retrieve.embed import _torch_dtype
+    from vvs.device import torch_dtype
 
-    assert _torch_dtype("float16") is torch.float16
-    assert _torch_dtype("bfloat16") is torch.bfloat16
-    assert _torch_dtype("float32") is torch.float32
+    assert torch_dtype("float16") is torch.float16
+    assert torch_dtype("bfloat16") is torch.bfloat16
+    assert torch_dtype("float32") is torch.float32
 
 
 def test_probe_rejects_nan_and_accepts_real_vectors() -> None:
@@ -267,22 +267,42 @@ def test_mps_cpu_fallback_is_armed_before_torch_is_imported() -> None:
 
 
 def test_forced_cpu_pins_the_device_for_the_rest_of_the_session() -> None:
-    from vvs.retrieve import embed
+    from vvs import device
 
     _clear_device_env()
-    embed.resolve_device.cache_clear()
-    original = embed._FORCED_CPU
+    device.resolve_device.cache_clear()
+    original = device._FORCED_CPU
     try:
-        embed._force_cpu()
-        assert embed.resolve_device() == "cpu"
+        device.force_cpu()
+        assert device.resolve_device() == "cpu"
         # Even an explicit request must not resurrect a device that just failed.
         os.environ["VVS_DEVICE"] = "mps"
-        embed.resolve_device.cache_clear()
-        assert embed.resolve_device() == "cpu"
+        device.resolve_device.cache_clear()
+        assert device.resolve_device() == "cpu"
     finally:
-        embed._FORCED_CPU = original
-        embed.resolve_device.cache_clear()
+        device._FORCED_CPU = original
+        device.resolve_device.cache_clear()
         _clear_device_env()
+
+
+def test_to_device_moves_tensors_and_leaves_other_values_alone() -> None:
+    import torch
+
+    from vvs.device import to_device
+
+    out = to_device({"ids": torch.zeros(2), "size": (4, 4), "flag": None}, "cpu")
+    assert out["ids"].device.type == "cpu"
+    assert out["size"] == (4, 4)
+    assert out["flag"] is None
+
+
+def test_embed_and_caption_share_one_device_decision() -> None:
+    """Two modules picking devices independently could split model and inputs."""
+    from vvs.media import caption
+    from vvs.retrieve import embed
+
+    assert embed.resolve_device is caption.resolve_device
+    assert embed.resolve_dtype is caption.resolve_dtype
 
 
 def _clear_device_env() -> None:

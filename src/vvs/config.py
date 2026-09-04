@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     )
     scene_caption_model: str = Field(
         default="qwen_vl",
-        description="qwen_vl (Qwen3-VL-2B-Instruct), florence2, or blip.",
+        description="qwen_vl (Qwen3-VL-2B-Instruct) or blip.",
     )
     shot_detect: bool = Field(
         default=False,
