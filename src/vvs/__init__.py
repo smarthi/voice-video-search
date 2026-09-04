@@ -23,4 +23,15 @@ os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 # one runtime, as on the Linux manylinux wheels.
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
+# Native crashes in torch, faiss, onnxruntime or the bundled FFmpeg kill the
+# process with a signal, so Python raises nothing and the only trace left is the
+# resource tracker's "leaked semaphore objects" note at shutdown -- which names
+# neither the cause nor the library. faulthandler turns that silence into a C
+# traceback on stderr. It only installs signal handlers, so it costs nothing
+# until something actually crashes. Set VVS_FAULTHANDLER=0 to opt out.
+if (os.environ.get("VVS_FAULTHANDLER") or "1") != "0":
+    import faulthandler
+
+    faulthandler.enable()
+
 __version__ = "0.1.0"

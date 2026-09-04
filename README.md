@@ -115,6 +115,28 @@ runs OpenMP-parallel, single-threaded writes do not. `vvs/__init__.py` sets
 documented escape hatch and a mitigation, not a cure — the cure is a single
 OpenMP runtime, which needs wheel builds we do not control.
 
+*Diagnosing a silent death.* A native crash in torch, faiss, onnxruntime or the
+bundled FFmpeg kills the process with a signal, so Python raises nothing and the
+only evidence is `resource_tracker: There appear to be 1 leaked semaphore
+objects` at shutdown — which names neither the step nor the library. Two things
+help. `vvs/__init__.py` enables `faulthandler`, which prints a C-level traceback
+on a fatal signal (`VVS_FAULTHANDLER=0` opts out). And `scripts/diagnose_search.py`
+walks the search path one step at a time, flushing before each, so the last line
+on screen is the step that died:
+
+```bash
+uv run python scripts/diagnose_search.py "your query"
+VVS_DEVICE=cpu           uv run python scripts/diagnose_search.py   # rule out Metal
+VVS_VISUAL_DTYPE=float32 uv run python scripts/diagnose_search.py   # rule out fp16
+KMP_DUPLICATE_LIB_OK=""  uv run python scripts/diagnose_search.py   # expose OMP Error #15
+```
+
+macOS also writes a full report per crash; the top frames name the guilty dylib:
+
+```bash
+ls -t ~/Library/Logs/DiagnosticReports/*.ips | head -1 | xargs head -60
+```
+
 *Surviving a crash.* An abort can kill the process mid-write, and `meta.json`
 carries the transcript, scene captions and OCR text — none of which can be
 rebuilt from the FAISS stores, so losing it means re-captioning the whole video.
