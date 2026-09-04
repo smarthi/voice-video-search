@@ -82,15 +82,25 @@ device automatically: Metal (`mps`) on Apple Silicon, then CUDA, then CPU.
 with a log line rather than crashing. Precision and batch width follow the
 device — fp16 and 8 frames per pass on a GPU, fp32 and 1 frame on CPU, since CPU
 fp16 is emulated and slower than fp32. Override with `VVS_VISUAL_DTYPE` and
-`VVS_VISUAL_BATCH`. On Metal, `PYTORCH_ENABLE_MPS_FALLBACK=1` is set before load
-so the few VL ops lacking a Metal kernel run on CPU instead of aborting, and a
-one-shot probe after load verifies the vectors are finite — if fp16 overflowed to
-NaN the model is silently rebuilt in fp32, because NaN vectors would otherwise
-poison the index instead of failing loudly.
+`VVS_VISUAL_BATCH`.
 
-If embedding is slow on an Apple machine, check the startup line: it prints
-`[embed] loading <model> (<device>, <dtype>)`. Anything other than `mps` there is
-the problem, and it usually means a CPU-only torch build.
+Three guards keep the GPU path from being worse than the CPU one. `vvs/__init__.py`
+sets `PYTORCH_ENABLE_MPS_FALLBACK=1` **before anything imports torch** — PyTorch
+reads it when the MPS backend initializes, so setting it later does nothing and a
+VL op with no Metal kernel takes the process down. If the model still fails to
+load on the GPU, the encoder pins itself to CPU for the rest of the session
+rather than retrying a broken device once per call. And a one-shot probe after
+load checks the vectors are finite: if fp16 overflowed to NaN the model is
+rebuilt in fp32, since NaN vectors would poison the index instead of failing
+loudly.
+
+**Troubleshooting.** The startup line prints `[embed] loading <model> (<device>,
+<dtype>)`. If it says anything but `mps` on Apple Silicon, that is why embedding
+is slow, and it usually means a CPU-only torch build. If Python dies during
+search with `leaked semaphore objects to clean up at shutdown`, that is a native
+crash rather than a Python error — the message is the resource tracker's parting
+note, not the cause. Set `VVS_DEVICE=cpu` to confirm the GPU is implicated, then
+`VVS_VISUAL_DTYPE=float32` to test whether it is specifically half precision.
 
 **Measured CPU cost (this laptop, 4 frames after warmup).** Qwen-VL-Embedding-2B
 28.3 s/frame; WeMM-Embedding-2B 72.8 s/frame — **2.6× slower** for the same

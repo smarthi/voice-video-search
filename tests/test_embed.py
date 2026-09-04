@@ -241,6 +241,50 @@ def test_probe_tolerates_a_model_that_raises() -> None:
     assert _probe_finite(_Broken()) is True
 
 
+def test_mps_cpu_fallback_is_armed_before_torch_is_imported() -> None:
+    """PyTorch reads this at MPS init; setting it after `import torch` is a no-op.
+
+    Regression: it was set inside the model loader, which runs long after torch
+    is imported, so unsupported Metal ops aborted the process instead of
+    falling back to CPU.
+    """
+    import subprocess
+    import sys
+
+    probe = (
+        "import sys, os;"
+        "assert 'torch' not in sys.modules;"
+        "import vvs;"
+        "assert os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] == '1';"
+        "assert 'torch' not in sys.modules, 'vvs imported torch at package import';"
+        "print('ok')"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=False
+    )
+    assert out.returncode == 0, out.stderr
+    assert "ok" in out.stdout
+
+
+def test_forced_cpu_pins_the_device_for_the_rest_of_the_session() -> None:
+    from vvs.retrieve import embed
+
+    _clear_device_env()
+    embed.resolve_device.cache_clear()
+    original = embed._FORCED_CPU
+    try:
+        embed._force_cpu()
+        assert embed.resolve_device() == "cpu"
+        # Even an explicit request must not resurrect a device that just failed.
+        os.environ["VVS_DEVICE"] = "mps"
+        embed.resolve_device.cache_clear()
+        assert embed.resolve_device() == "cpu"
+    finally:
+        embed._FORCED_CPU = original
+        embed.resolve_device.cache_clear()
+        _clear_device_env()
+
+
 def _clear_device_env() -> None:
     for key in ("VVS_DEVICE", "VVS_VISUAL_DTYPE", "VVS_VISUAL_BATCH"):
         os.environ.pop(key, None)

@@ -184,12 +184,18 @@ emulated and slower than fp32. Batch width follows too: 8 frames per forward pas
 on a GPU where per-call overhead dominates, 1 on CPU where it does not and where
 a narrow batch keeps peak memory small.
 
-Two guards make that safe. On Metal, `PYTORCH_ENABLE_MPS_FALLBACK=1` is set
-before load so the handful of VL ops without a Metal kernel run on CPU instead of
-aborting. After load, a one-shot probe encodes a throwaway string and checks the
-result is finite and non-zero; if fp16 has overflowed to NaN the model is rebuilt
-in fp32. Without that probe a half-precision overflow would write NaN vectors
-into an index and silently break retrieval rather than fail loudly.
+Three guards make that safe. `vvs/__init__.py` sets `PYTORCH_ENABLE_MPS_FALLBACK=1`
+before anything imports torch, so the handful of VL ops without a Metal kernel run
+on CPU instead of aborting. Placement matters: PyTorch reads that variable when
+the MPS backend initializes, so setting it inside the model loader — after torch
+is already imported — has no effect at all, and the symptom is a hard process
+crash reported as `leaked semaphore objects to clean up at shutdown` rather than a
+Python traceback. Second, a GPU that fails to load the model pins the session to
+CPU instead of retrying a broken device on every call. Third, a one-shot probe
+after load encodes a throwaway string and checks the result is finite and
+non-zero; if fp16 has overflowed to NaN the model is rebuilt in fp32. Without
+that probe a half-precision overflow would write NaN vectors into an index and
+silently break retrieval rather than fail loudly.
 
 Measured on the prototype laptop (CPU, 4 frames after warmup), Qwen-VL-Embedding-2B
 costs **28.3 s/frame** against WeMM-Embedding-2B's **72.8 s/frame** — 2.6× slower

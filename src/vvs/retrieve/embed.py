@@ -220,11 +220,16 @@ def _dim_from_name(name: str) -> int:
     return 2048
 
 
+_FORCED_CPU = False
+
+
 @lru_cache(maxsize=1)
 def resolve_device() -> str:
     """Best available torch device. `VVS_DEVICE` wins if it is actually usable."""
     import torch
 
+    if _FORCED_CPU:
+        return "cpu"
     want = (os.environ.get("VVS_DEVICE") or "").strip().lower()
     if want:
         if want == "mps" and not torch.backends.mps.is_available():
@@ -302,14 +307,26 @@ def _clip_bundle():
 # a multi-GB model on every alternating call.
 @lru_cache(maxsize=2)
 def _sentence_transformer(model_id: str) -> object:
+    # The Metal CPU-fallback switch is armed in vvs/__init__.py; it has to be set
+    # before torch is imported, so it cannot live here.
+    device = resolve_device()
+    try:
+        return _load_st(model_id, device, resolve_dtype(device))
+    except Exception as exc:
+        if device == "cpu":
+            raise
+        # A GPU that cannot load the model is worth abandoning for the whole
+        # session, not once per call: CPU is slow but it always works. Pinning
+        # the choice also keeps hand-placed tensors (the CLIP path) on the same
+        # device as the weights.
+        print(f"[embed] {device} load failed ({type(exc).__name__}: {exc}); using cpu")
+        _force_cpu()
+        return _load_st(model_id, "cpu", resolve_dtype("cpu"))
+
+
+def _load_st(model_id: str, device: str, dtype: str) -> object:
     from sentence_transformers import SentenceTransformer
 
-    device = resolve_device()
-    dtype = resolve_dtype(device)
-    if device == "mps":
-        # A few VL ops still have no Metal kernel; without this the load or the
-        # first forward pass dies instead of quietly running those on CPU.
-        os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
     print(f"[embed] loading {model_id} ({device}, {dtype})")
     model = SentenceTransformer(
         model_id,
@@ -321,13 +338,15 @@ def _sentence_transformer(model_id: str) -> object:
         # Half precision overflows in some VL stacks and yields NaN vectors,
         # which would silently poison an index. Rebuild in fp32 instead.
         print(f"[embed] {dtype} produced non-finite vectors; reloading in float32")
-        model = SentenceTransformer(
-            model_id,
-            device=device,
-            trust_remote_code=True,
-            model_kwargs={"torch_dtype": _torch_dtype("float32")},
-        )
+        model = _load_st(model_id, device, "float32")
     return model
+
+
+def _force_cpu() -> None:
+    global _FORCED_CPU
+
+    _FORCED_CPU = True
+    resolve_device.cache_clear()
 
 
 def _probe_finite(model) -> bool:
