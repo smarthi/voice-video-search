@@ -316,9 +316,11 @@ def _wemm(model_id: str):
 def _bge():
     from sentence_transformers import SentenceTransformer
 
-    # 384-d MiniLM-class model: fast enough on CPU that fp16 buys nothing, but it
-    # still rides along on the GPU when there is one.
-    device = resolve_device()
+    # Deliberately CPU. This is a 33M-parameter 384-d model that was never the
+    # bottleneck, so a GPU buys it nothing measurable, while loading a third
+    # model into the Metal context alongside the 2B embedder and the 2B
+    # captioner is pure added risk. `VVS_BGE_DEVICE` exists for benchmarking.
+    device = (os.environ.get("VVS_BGE_DEVICE") or "cpu").strip().lower()
     print(f"[embed] loading BAAI/bge-small-en-v1.5 ({device})")
     return SentenceTransformer("BAAI/bge-small-en-v1.5", device=device)
 
