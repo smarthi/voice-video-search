@@ -174,7 +174,24 @@ alone cannot identify an index. Every index therefore records
 name, and only then dimension. Dimension-first inference silently mismatches the
 two 2048-d families and must not be reintroduced.
 
-Measured on the prototype laptop (4 frames after warmup), Qwen-VL-Embedding-2B
+### 5.1 Device selection
+
+The visual encoder dominates index time, so the device it lands on is the single
+biggest performance lever in the POC. `retrieve/embed.py` auto-detects: Metal
+(`mps`) on Apple Silicon, then CUDA, then CPU, with `VVS_DEVICE` as an override.
+Precision follows the device — fp16 on a GPU, fp32 on CPU, because CPU fp16 is
+emulated and slower than fp32. Batch width follows too: 8 frames per forward pass
+on a GPU where per-call overhead dominates, 1 on CPU where it does not and where
+a narrow batch keeps peak memory small.
+
+Two guards make that safe. On Metal, `PYTORCH_ENABLE_MPS_FALLBACK=1` is set
+before load so the handful of VL ops without a Metal kernel run on CPU instead of
+aborting. After load, a one-shot probe encodes a throwaway string and checks the
+result is finite and non-zero; if fp16 has overflowed to NaN the model is rebuilt
+in fp32. Without that probe a half-precision overflow would write NaN vectors
+into an index and silently break retrieval rather than fail loudly.
+
+Measured on the prototype laptop (CPU, 4 frames after warmup), Qwen-VL-Embedding-2B
 costs **28.3 s/frame** against WeMM-Embedding-2B's **72.8 s/frame** — 2.6× slower
 for the same 2048-d output, with comparable text-query cost (9.8 s vs 10.2 s).
 Re-embedding the 1,332-frame sample archive with WeMM would take roughly 27
@@ -186,9 +203,9 @@ timestamp judgments exist, plus rank overlap, Spearman agreement and latency.
 
 | Role | Model | Device / quant | Dim | Notes |
 | --- | --- | --- | --- | --- |
-| Visual (default) | `Qwen/Qwen3-VL-Embedding-2B` | CPU | 2048 | Shared image/text space. Official VL embed sizes are **2B / 8B only** — there is no 4B VL embedder (`Qwen3-Embedding-4B` is text-only). `VVS_VISUAL_MODEL=qwen-vl-emb-4B` aliases to 2B and logs that. |
-| Visual (alternative) | `WeMM-Embedding-2B` (also 4B / 9B) | CPU | 2048 / 2560 / 4096 | `VVS_VISUAL_ENCODER=wemm`. Uses `encode_query` / `encode_document` rather than Qwen's prompt argument. Matryoshka-trained, so `VVS_VISUAL_TRUNCATE_DIM` can shorten vectors to a supported width. |
-| Visual (legacy) | open_clip ViT-B-32 `laion2b_s34b_b79k` | CPU | 512 | `VVS_VISUAL_ENCODER=clip`. Existing 512-d indexes still search. Switching encoder requires **Re-analyze**. |
+| Visual (default) | `Qwen/Qwen3-VL-Embedding-2B` | auto (mps/cuda fp16, cpu fp32) | 2048 | Shared image/text space. Official VL embed sizes are **2B / 8B only** — there is no 4B VL embedder (`Qwen3-Embedding-4B` is text-only). `VVS_VISUAL_MODEL=qwen-vl-emb-4B` aliases to 2B and logs that. |
+| Visual (alternative) | `WeMM-Embedding-2B` (also 4B / 9B) | auto (mps/cuda fp16, cpu fp32) | 2048 / 2560 / 4096 | `VVS_VISUAL_ENCODER=wemm`. Uses `encode_query` / `encode_document` rather than Qwen's prompt argument. Matryoshka-trained, so `VVS_VISUAL_TRUNCATE_DIM` can shorten vectors to a supported width. |
+| Visual (legacy) | open_clip ViT-B-32 `laion2b_s34b_b79k` | auto | 512 | `VVS_VISUAL_ENCODER=clip`. Existing 512-d indexes still search. Switching encoder requires **Re-analyze**. |
 | Scene caption | `Qwen/Qwen3-VL-2B-Instruct` | CPU | — | Opt-in X-Ray. Different checkpoint from the embedder: Instruct writes English; Embedding only writes vectors. BLIP-base is the CPU fallback. Florence-2 via `VVS_SCENE_CAPTION_MODEL=florence2`. |
 | ASR | faster-whisper `small` int8 | CPU | — | Skipped when there is no audio track |
 | Text | BAAI/bge-small-en-v1.5 | CPU | 384 | `passage:` at index, `query:` at search (OCR + optional transcript + scene) |

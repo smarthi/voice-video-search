@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+
+import numpy as np
+
 from vvs.config import Settings
 from vvs.models import ModelCard
 from vvs.retrieve.embed import (
@@ -138,6 +142,108 @@ def test_normalize_encoder_kind() -> None:
     assert normalize_encoder_kind("clip") == "clip"
     assert normalize_encoder_kind(None) == "qwen_vl"
     assert normalize_encoder_kind("nonsense") == "qwen_vl"
+
+
+def test_dtype_is_half_on_gpu_and_full_on_cpu() -> None:
+    """CPU fp16 is emulated and slower, so it must never be chosen there."""
+    from vvs.retrieve.embed import resolve_dtype
+
+    _clear_device_env()
+    assert resolve_dtype("cpu") == "float32"
+    assert resolve_dtype("mps") == "float16"
+    assert resolve_dtype("cuda") == "float16"
+
+
+def test_dtype_env_override_wins_for_every_device() -> None:
+    from vvs.retrieve.embed import resolve_dtype
+
+    _clear_device_env()
+    for value, expected in (
+        ("float32", "float32"),
+        ("fp32", "float32"),
+        ("bfloat16", "bfloat16"),
+        ("bf16", "bfloat16"),
+        ("fp16", "float16"),
+        ("half", "float16"),
+    ):
+        os.environ["VVS_VISUAL_DTYPE"] = value
+        assert resolve_dtype("mps") == expected, value
+        assert resolve_dtype("cpu") == expected, value
+    _clear_device_env()
+
+
+def test_unknown_dtype_falls_back_to_the_device_default() -> None:
+    from vvs.retrieve.embed import resolve_dtype
+
+    _clear_device_env()
+    os.environ["VVS_VISUAL_DTYPE"] = "quantum"
+    assert resolve_dtype("cpu") == "float32"
+    assert resolve_dtype("mps") == "float16"
+    _clear_device_env()
+
+
+def test_image_batch_defaults_wider_on_gpu() -> None:
+    from vvs.retrieve.embed import default_image_batch
+
+    _clear_device_env()
+    assert default_image_batch("cpu") == 1
+    assert default_image_batch("mps") == 8
+    assert default_image_batch("cuda") == 8
+
+
+def test_image_batch_env_override() -> None:
+    from vvs.retrieve.embed import default_image_batch
+
+    _clear_device_env()
+    os.environ["VVS_VISUAL_BATCH"] = "32"
+    assert default_image_batch("cpu") == 32
+    for bogus in ("0", "-4", "many", ""):
+        os.environ["VVS_VISUAL_BATCH"] = bogus
+        assert default_image_batch("cpu") == 1, bogus
+    _clear_device_env()
+
+
+def test_dtype_names_map_to_real_torch_dtypes() -> None:
+    import torch
+
+    from vvs.retrieve.embed import _torch_dtype
+
+    assert _torch_dtype("float16") is torch.float16
+    assert _torch_dtype("bfloat16") is torch.bfloat16
+    assert _torch_dtype("float32") is torch.float32
+
+
+def test_probe_rejects_nan_and_accepts_real_vectors() -> None:
+    """Guards the fp16 fallback: NaN vectors would silently poison an index."""
+    from vvs.retrieve.embed import _probe_finite
+
+    class _Model:
+        def __init__(self, value):
+            self.value = value
+
+        def encode(self, texts, **_kw):
+            return np.full((len(texts), 4), self.value, dtype=np.float32)
+
+    assert _probe_finite(_Model(0.5)) is True
+    assert _probe_finite(_Model(float("nan"))) is False
+    assert _probe_finite(_Model(float("inf"))) is False
+    assert _probe_finite(_Model(0.0)) is False
+
+
+def test_probe_tolerates_a_model_that_raises() -> None:
+    """A probe failure must not block loading; assume the model is fine."""
+    from vvs.retrieve.embed import _probe_finite
+
+    class _Broken:
+        def encode(self, texts, **_kw):
+            raise RuntimeError("no kernel")
+
+    assert _probe_finite(_Broken()) is True
+
+
+def _clear_device_env() -> None:
+    for key in ("VVS_DEVICE", "VVS_VISUAL_DTYPE", "VVS_VISUAL_BATCH"):
+        os.environ.pop(key, None)
 
 
 if __name__ == "__main__":

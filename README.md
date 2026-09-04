@@ -76,6 +76,22 @@ transcript and OCR. `scripts/compare_encoders.py` then scores the two indexes
 against each other (recall@k, MRR, nDCG when timestamp judgments exist; rank
 overlap and Spearman agreement when they do not, plus encode and search latency).
 
+**Device.** The visual encoder is the slowest stage by far, so it picks the best
+device automatically: Metal (`mps`) on Apple Silicon, then CUDA, then CPU.
+`VVS_DEVICE=mps|cuda|cpu` overrides, and an unavailable choice falls back to CPU
+with a log line rather than crashing. Precision and batch width follow the
+device — fp16 and 8 frames per pass on a GPU, fp32 and 1 frame on CPU, since CPU
+fp16 is emulated and slower than fp32. Override with `VVS_VISUAL_DTYPE` and
+`VVS_VISUAL_BATCH`. On Metal, `PYTORCH_ENABLE_MPS_FALLBACK=1` is set before load
+so the few VL ops lacking a Metal kernel run on CPU instead of aborting, and a
+one-shot probe after load verifies the vectors are finite — if fp16 overflowed to
+NaN the model is silently rebuilt in fp32, because NaN vectors would otherwise
+poison the index instead of failing loudly.
+
+If embedding is slow on an Apple machine, check the startup line: it prints
+`[embed] loading <model> (<device>, <dtype>)`. Anything other than `mps` there is
+the problem, and it usually means a CPU-only torch build.
+
 **Measured CPU cost (this laptop, 4 frames after warmup).** Qwen-VL-Embedding-2B
 28.3 s/frame; WeMM-Embedding-2B 72.8 s/frame — **2.6× slower** for the same
 2048-d output. Text queries are comparable (9.8 s vs 10.2 s). At that rate,
@@ -318,6 +334,9 @@ Commands: `uv run vvs index|query|app|warm|list`.
 | `VVS_VISUAL_ENCODER` | `qwen_vl` (default), `wemm`, or `clip` (old 512-d indexes) |
 | `VVS_VISUAL_MODEL` | HF id or alias (`qwen-vl-emb-4B` → official 2B VL; `8b` → 8B; `wemm-2b` / `wemm-4b` / `wemm-9b`) |
 | `VVS_VISUAL_TRUNCATE_DIM` | Matryoshka width for WeMM only; must be a supported dim |
+| `VVS_DEVICE` | `mps`, `cuda`, or `cpu`. Default auto-detects (mps → cuda → cpu) |
+| `VVS_VISUAL_DTYPE` | `float16`, `bfloat16`, `float32`. Default fp16 on GPU, fp32 on CPU |
+| `VVS_VISUAL_BATCH` | Frames per forward pass. Default 8 on GPU, 1 on CPU |
 
 Search weights live in `retrieve/search.py` (not env): per-video RRF (`TEXT_WEIGHT` 1.6, `OCR_WEIGHT` 0.6, `SCENE_WEIGHT` 1.0) and archive merge (`SCENE_ANN_WEIGHT` 1.15, `TEXT_ANN_WEIGHT` 1.4, `OCR_ANN_WEIGHT` 0.55, `LEXICAL_BLEND` 0.2, `MOTION_BLEND` 0.45). Motion/flash keep thresholds are in `media/motion.py` (`FLASH_KEEP` 0.22, `MOTION_KEEP` 0.18).
 

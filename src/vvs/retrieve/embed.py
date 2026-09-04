@@ -1,4 +1,9 @@
-"""Visual encoders (Qwen3-VL-Embedding, WeMM-Embedding, open_clip) plus BGE text. CPU only.
+"""Visual encoders (Qwen3-VL-Embedding, WeMM-Embedding, open_clip) plus BGE text.
+
+Device is auto-detected: Metal (`mps`) on Apple Silicon, then CUDA, then CPU.
+`VVS_DEVICE` overrides it. This matters a lot — a 2B VL encoder on CPU costs tens
+of seconds per frame, and the same model on an M-series GPU is an order of
+magnitude quicker.
 
 Official Qwen VL embedding sizes are 2B (2048-d) and 8B (4096-d). There is no
 4B VL embedder — Qwen3-Embedding-4B is text-only. `qwen-vl-emb-4B` aliases to 2B.
@@ -12,6 +17,7 @@ why `ModelCard.visual_encoder` is recorded and `encoder_kind` prefers it.
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -215,16 +221,77 @@ def _dim_from_name(name: str) -> int:
 
 
 @lru_cache(maxsize=1)
+def resolve_device() -> str:
+    """Best available torch device. `VVS_DEVICE` wins if it is actually usable."""
+    import torch
+
+    want = (os.environ.get("VVS_DEVICE") or "").strip().lower()
+    if want:
+        if want == "mps" and not torch.backends.mps.is_available():
+            print("[embed] VVS_DEVICE=mps but Metal is unavailable; using cpu")
+            return "cpu"
+        if want == "cuda" and not torch.cuda.is_available():
+            print("[embed] VVS_DEVICE=cuda but no CUDA device; using cpu")
+            return "cpu"
+        return want
+    if torch.backends.mps.is_available():
+        return "mps"
+    if torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
+
+
+def resolve_dtype(device: str | None = None) -> str:
+    """Half precision on a GPU, full precision on CPU.
+
+    CPU fp16 is emulated and slower than fp32, so it is never chosen there.
+    `VVS_VISUAL_DTYPE` accepts float16 / bfloat16 / float32.
+    """
+    want = (os.environ.get("VVS_VISUAL_DTYPE") or "").strip().lower()
+    if want in {"float16", "fp16", "half"}:
+        return "float16"
+    if want in {"bfloat16", "bf16"}:
+        return "bfloat16"
+    if want in {"float32", "fp32", "full"}:
+        return "float32"
+    dev = device or resolve_device()
+    return "float32" if dev == "cpu" else "float16"
+
+
+def default_image_batch(device: str | None = None) -> int:
+    """Frames per forward pass.
+
+    Batch 1 keeps peak memory tiny on CPU, where each frame is slow anyway. On a
+    GPU the per-call overhead dominates, so a wider batch is most of the win.
+    """
+    override = (os.environ.get("VVS_VISUAL_BATCH") or "").strip()
+    if override.isdigit() and int(override) > 0:
+        return int(override)
+    return 1 if (device or resolve_device()) == "cpu" else 8
+
+
+def _torch_dtype(name: str):
+    import torch
+
+    return {
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "float32": torch.float32,
+    }[name]
+
+
+@lru_cache(maxsize=1)
 def _clip_bundle():
     import open_clip
     import torch
 
-    torch.set_num_threads(max(1, min(16, __import__("os").cpu_count() or 8)))
-    print(f"[embed] loading {CLIP_NAME}")
+    torch.set_num_threads(max(1, min(16, os.cpu_count() or 8)))
+    device = resolve_device()
+    print(f"[embed] loading {CLIP_NAME} ({device})")
     model, _, preprocess = open_clip.create_model_and_transforms(
         "ViT-B-32",
         pretrained="laion2b_s34b_b79k",
-        device="cpu",
+        device=device,
     )
     tokenizer = open_clip.get_tokenizer("ViT-B-32")
     model.eval()
@@ -237,8 +304,44 @@ def _clip_bundle():
 def _sentence_transformer(model_id: str) -> object:
     from sentence_transformers import SentenceTransformer
 
-    print(f"[embed] loading {model_id} (CPU)")
-    return SentenceTransformer(model_id, device="cpu", trust_remote_code=True)
+    device = resolve_device()
+    dtype = resolve_dtype(device)
+    if device == "mps":
+        # A few VL ops still have no Metal kernel; without this the load or the
+        # first forward pass dies instead of quietly running those on CPU.
+        os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+    print(f"[embed] loading {model_id} ({device}, {dtype})")
+    model = SentenceTransformer(
+        model_id,
+        device=device,
+        trust_remote_code=True,
+        model_kwargs={"torch_dtype": _torch_dtype(dtype)},
+    )
+    if dtype != "float32" and not _probe_finite(model):
+        # Half precision overflows in some VL stacks and yields NaN vectors,
+        # which would silently poison an index. Rebuild in fp32 instead.
+        print(f"[embed] {dtype} produced non-finite vectors; reloading in float32")
+        model = SentenceTransformer(
+            model_id,
+            device=device,
+            trust_remote_code=True,
+            model_kwargs={"torch_dtype": _torch_dtype("float32")},
+        )
+    return model
+
+
+def _probe_finite(model) -> bool:
+    """Encode one throwaway string and check the result is usable."""
+    try:
+        encode = getattr(model, "encode_query", None) or model.encode
+        out = np.asarray(
+            encode(["probe"], convert_to_numpy=True, show_progress_bar=False),
+            dtype=np.float32,
+        )
+    except Exception as exc:
+        print(f"[embed] dtype probe failed ({type(exc).__name__}: {exc}); assuming ok")
+        return True
+    return bool(out.size) and bool(np.isfinite(out).all()) and float(np.abs(out).max()) > 0
 
 
 def _qwen_vl(model_id: str):
@@ -253,8 +356,11 @@ def _wemm(model_id: str):
 def _bge():
     from sentence_transformers import SentenceTransformer
 
-    print("[embed] loading BAAI/bge-small-en-v1.5")
-    return SentenceTransformer("BAAI/bge-small-en-v1.5", device="cpu")
+    # 384-d MiniLM-class model: fast enough on CPU that fp16 buys nothing, but it
+    # still rides along on the GPU when there is one.
+    device = resolve_device()
+    print(f"[embed] loading BAAI/bge-small-en-v1.5 ({device})")
+    return SentenceTransformer("BAAI/bge-small-en-v1.5", device=device)
 
 
 def _model_id_for(*, meta=None, settings=None) -> str:
@@ -303,9 +409,10 @@ def embed_clip_images(
     kind = encoder_kind(meta=meta, settings=cfg)
     if kind == "clip":
         return _embed_clip_images(paths, batch_size=batch_size or 16)
+    vl_batch = batch_size or default_image_batch()
     if kind == "wemm":
-        return _embed_wemm_images(paths, batch_size=batch_size or 1, meta=meta, settings=cfg)
-    return _embed_qwen_images(paths, batch_size=batch_size or 1, meta=meta, settings=cfg)
+        return _embed_wemm_images(paths, batch_size=vl_batch, meta=meta, settings=cfg)
+    return _embed_qwen_images(paths, batch_size=vl_batch, meta=meta, settings=cfg)
 
 
 def embed_clip_texts(texts: list[str], *, meta=None, settings=None) -> np.ndarray:
@@ -334,7 +441,7 @@ def _embed_clip_images(paths: list[str] | list[Path], batch_size: int) -> np.nda
             for p in batch_paths:
                 with Image.open(p) as im:
                     images.append(preprocess(im.convert("RGB")))
-            tensor = torch.stack(images, dim=0)
+            tensor = torch.stack(images, dim=0).to(resolve_device())
             feats = model.encode_image(tensor)
             feats = feats / feats.norm(dim=-1, keepdim=True)
             vecs.append(feats.cpu().numpy().astype(np.float32))
@@ -346,7 +453,7 @@ def _embed_clip_texts(texts: list[str]) -> np.ndarray:
     import torch
 
     model, _preprocess, tokenizer = _clip_bundle()
-    tokens = tokenizer(texts)
+    tokens = tokenizer(texts).to(resolve_device())
     with torch.no_grad():
         feats = model.encode_text(tokens)
         feats = feats / feats.norm(dim=-1, keepdim=True)

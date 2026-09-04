@@ -51,5 +51,8 @@ url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
 [tool.uv.sources]
+# Avoids pulling ~2 GB of CUDA on Linux. This does not cost Apple Silicon its
+# Metal backend: "cpu" only names the non-CUDA variant, and the macOS arm64
+# wheels this index serves are the same ones PyPI has, mps support included.
 torch = { index = "pytorch-cpu" }
 torchvision = { index = "pytorch-cpu" }

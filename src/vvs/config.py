@@ -65,6 +65,20 @@ class Settings(BaseSettings):
             "Ignored by encoders that are not Matryoshka-trained."
         ),
     )
+    # Read from the environment inside retrieve.embed (which has torch) rather
+    # than here, so config stays import-light. Declared for discoverability.
+    device: str | None = Field(
+        default=None,
+        description="Force a torch device: mps, cuda, or cpu. Default auto-detects.",
+    )
+    visual_dtype: str | None = Field(
+        default=None,
+        description="float16, bfloat16 or float32. Default: fp16 on GPU, fp32 on CPU.",
+    )
+    visual_batch: int | None = Field(
+        default=None,
+        description="Frames per forward pass. Default 8 on GPU, 1 on CPU.",
+    )
 
 
 def load_settings(
