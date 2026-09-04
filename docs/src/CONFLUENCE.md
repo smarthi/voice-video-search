@@ -200,6 +200,25 @@ different devices. The GPU matters more for captioning than for embedding:
 captioning is autoregressive, so a scene costs up to `QWEN_MAX_TOKENS` sequential
 forward passes where an embedding costs one.
 
+### 5.2 One FFmpeg per process
+
+`rapidocr-onnxruntime` requires full `opencv-python`, which bundles `libavdevice`
+alongside `libavcodec` and `libavformat`. PyAV bundles its own copy. On Linux the
+duplication is merely wasteful, but on macOS `libavdevice` registers the
+AVFoundation Objective-C classes `AVFFrameReceiver` and `AVFAudioReceiver`, and
+two copies in one process means two registrations of the same class name. The
+ObjC runtime reports this at `stage=ocr` — the point where RapidOCR first imports
+`cv2` — and warns that it "may cause spurious casting failures and mysterious
+crashes".
+
+The fix is `opencv-python-headless`, whose wheel ships `libavcodec` and
+`libavformat` but no `libavdevice`, so the duplicate classes cannot arise. A
+`[tool.uv] override-dependencies` entry neutralises RapidOCR's pin on the full
+build. Nothing in the POC opens an OpenCV window and RapidOCR uses cv2 only for
+array manipulation, so the headless wheel costs nothing. The invariant to hold is
+one `libavdevice` per environment; `find .venv -name 'libavdevice*'` should
+return exactly one path, PyAV's.
+
 Measured on the prototype laptop (CPU, 4 frames after warmup), Qwen-VL-Embedding-2B
 costs **28.3 s/frame** against WeMM-Embedding-2B's **72.8 s/frame** — 2.6× slower
 for the same 2048-d output, with comparable text-query cost (9.8 s vs 10.2 s).

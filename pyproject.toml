@@ -14,6 +14,7 @@ dependencies = [
     "imageio-ffmpeg>=0.5.1",
     "numpy>=2.2.0",
     "open-clip-torch>=2.32.0",
+    "opencv-python-headless>=4.5.1.48",
     "pillow>=11.1.0",
     "pydantic>=2.11.0",
     "pydantic-settings>=2.8.0",
@@ -44,6 +45,15 @@ packages = ["src/vvs"]
 
 [tool.uv]
 package = true
+
+# rapidocr-onnxruntime asks for full opencv-python, which bundles libavdevice.
+# PyAV bundles its own, and on macOS both register the AVFoundation Objective-C
+# classes (AVFFrameReceiver, AVFAudioReceiver) into one process. The ObjC runtime
+# warns that this "may cause spurious casting failures and mysterious crashes",
+# and it does. The headless wheel ships libavcodec and libavformat but no
+# libavdevice, so the duplicate classes disappear. Nothing here opens an OpenCV
+# window, so headless costs us nothing; RapidOCR only uses cv2 for array work.
+override-dependencies = ["opencv-python; sys_platform == 'never'"]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"

@@ -102,6 +102,23 @@ crash rather than a Python error — the message is the resource tracker's parti
 note, not the cause. Set `VVS_DEVICE=cpu` to confirm the GPU is implicated, then
 `VVS_VISUAL_DTYPE=float32` to test whether it is specifically half precision.
 
+**Why `opencv-python-headless`, and do not "fix" it back.** `rapidocr-onnxruntime`
+requires full `opencv-python`, which bundles `libavdevice`. PyAV bundles its own,
+and on macOS both register the same AVFoundation Objective-C classes into one
+process, which the ObjC runtime reports at `stage=ocr`:
+
+```
+objc[...]: Class AVFFrameReceiver is implemented in both .../av/.dylibs/libavdevice.62...
+           and .../cv2/.dylibs/libavdevice.61... One of the duplicates must be removed.
+```
+
+It ends with "may cause spurious casting failures and mysterious crashes", and it
+means it. The headless wheel ships `libavcodec` and `libavformat` but **no
+`libavdevice`**, so the duplicate classes disappear. A `[tool.uv]
+override-dependencies` entry neutralises RapidOCR's pin. Nothing here opens an
+OpenCV window and RapidOCR only uses cv2 for array work, so headless costs
+nothing. Verify with `find .venv -name 'libavdevice*'` — exactly one hit, PyAV's.
+
 **Measured CPU cost (this laptop, 4 frames after warmup).** Qwen-VL-Embedding-2B
 28.3 s/frame; WeMM-Embedding-2B 72.8 s/frame — **2.6× slower** for the same
 2048-d output. Text queries are comparable (9.8 s vs 10.2 s). At that rate,
