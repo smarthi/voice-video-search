@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     qdrant_shards: int = 8
     force_mute: bool = Field(
         default=False,
-        description="Ignore audio and skip Whisper (Sphere-style mute path).",
+        description="Ignore audio and skip Whisper (mute video path).",
     )
     scene_caption: bool = Field(
         default=False,

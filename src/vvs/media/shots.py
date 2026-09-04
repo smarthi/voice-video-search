@@ -1,6 +1,6 @@
 """TransNetV2 shot grouping: cut the video, then embed a few stills per shot.
 
-A Sphere take with no hard cut is still one shot. Long shots are sampled on a
+A take with no hard cut is still one shot. Long shots are sampled on a
 time floor so a 3-minute fly-through does not collapse to a single vector.
 """
 

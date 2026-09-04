@@ -10,7 +10,7 @@ flowchart TB
   FK --> JPG[("data/id/frames/*.jpg")]
   PROBE --> ASR{"audio track and not VVS_FORCE_MUTE?"}
   ASR -->|yes| WH["faster-whisper small int8, native segments"]
-  ASR -->|no| MUTE["Skip ASR, mute Sphere path"]
+  ASR -->|no| MUTE["Skip ASR, mute video path"]
   JPG --> OCR["RapidOCR on kept stills"]
   JPG --> SC{"--scene-caption?"}
   SC -->|yes| CAP["Qwen3-VL-2B-Instruct captions the representative still"]

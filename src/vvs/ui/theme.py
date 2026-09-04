@@ -1,4 +1,4 @@
-"""Sightline visual language for the Gradio demo. Style only — no retrieval logic."""
+"""Visual language for the Gradio demo. Style only — no retrieval logic."""
 
 from __future__ import annotations
 
@@ -10,9 +10,9 @@ from gradio.themes.utils.fonts import Font
 
 CSS_PATH = Path(__file__).with_name("theme.css")
 
-# Lenovo red + ink neutrals from Sightline_Sphere_Retrieval (16).html
-SIGHTLINE_RED = Color(
-    name="sightline_red",
+# Accent red + ink neutrals for the dark theme.
+ACCENT_RED = Color(
+    name="accent_red",
     c50="#FFE8E6",
     c100="#FFC7C2",
     c200="#FF9A90",
@@ -26,8 +26,8 @@ SIGHTLINE_RED = Color(
     c950="#2A0604",
 )
 
-SIGHTLINE_INK = Color(
-    name="sightline_ink",
+NEUTRAL_INK = Color(
+    name="neutral_ink",
     c50="#EAEEF4",
     c100="#C5CDD8",
     c200="#8B98A9",
@@ -97,7 +97,7 @@ TOPBAR_HTML = """
       <ellipse cx="12" cy="12" rx="4" ry="9"/>
       <path d="M3.2 9h17.6M3.2 15h17.6"/>
     </svg>
-    <div class="sl-mark"><b>Sightline</b><span>Voice Video Search</span></div>
+    <div class="sl-mark"><b>Voice</b><span>Video Search</span></div>
   </div>
   <div class="sl-pills">
     <span class="sl-pill"><i class="sl-dot on"></i>Local</span>
@@ -120,9 +120,9 @@ def load_css() -> str:
 
 def build_theme() -> gr.themes.Base:
     return gr.themes.Base(
-        primary_hue=SIGHTLINE_RED,
-        secondary_hue=SIGHTLINE_RED,
-        neutral_hue=SIGHTLINE_INK,
+        primary_hue=ACCENT_RED,
+        secondary_hue=ACCENT_RED,
+        neutral_hue=NEUTRAL_INK,
         font=(Font("Helvetica Neue"), "Helvetica", "Arial", "ui-sans-serif", "sans-serif"),
         font_mono=("ui-monospace", "SF Mono", "Menlo", "Consolas", "Liberation Mono", "monospace"),
     ).set(

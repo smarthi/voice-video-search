@@ -64,7 +64,7 @@ def test_ann_scores_beat_rrf_confidence() -> None:
     """Interview can look 92% confident from ASR extras and still lose."""
     interview = [
         _hit(
-            "tolga",
+            "interview",
             1,
             0.92,
             visual_score=0.27,
@@ -91,7 +91,7 @@ def test_ann_scores_beat_rrf_confidence() -> None:
 
 def test_caption_ann_wins_without_query_words() -> None:
     """Synonyms: BGE scene score is high, caption never says 'alps'."""
-    interview = [_hit("tolga", 1, 0.9, visual_score=0.28, scene_caption="a man in a suit")]
+    interview = [_hit("interview", 1, 0.9, visual_score=0.28, scene_caption="a man in a suit")]
     alps = [
         _hit(
             "doc",
@@ -113,7 +113,7 @@ def test_spoken_robotics_beats_music_video_visual() -> None:
     """Only the interview says robotics; a song still can have a high visual score."""
     interview = [
         _hit(
-            "tolga",
+            "interview",
             1,
             0.4,
             visual_score=0.22,
@@ -133,14 +133,14 @@ def test_spoken_robotics_beats_music_video_visual() -> None:
         )
     ]
     merged = merge_corpus_hits([song, interview], top_k=3, query="robotics")
-    assert merged[0].video_id == "tolga"
+    assert merged[0].video_id == "interview"
 
 
 def test_instrument_still_beats_unrelated_interview_asr() -> None:
     """BGE ~0.66 on Kira-talk is not a trumpet match; the sax close-up is."""
     interview = [
         _hit(
-            "tolga",
+            "interview",
             1,
             0.62,
             visual_score=0.17,

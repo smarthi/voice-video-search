@@ -55,10 +55,10 @@ def _entry(
 
 def test_filter_matches_title_and_id() -> None:
     items = [
-        _entry("abc123", title="Lenovo Tech World"),
+        _entry("abc123", title="Tech Conference Talk"),
         _entry("zzz999", title="Skyfall"),
     ]
-    assert [i.video_id for i in filter_entries(items, "lenovo")] == ["abc123"]
+    assert [i.video_id for i in filter_entries(items, "tech conference")] == ["abc123"]
     assert [i.video_id for i in filter_entries(items, "ZZZ")] == ["zzz999"]
     assert len(filter_entries(items, "  ")) == 2
     assert filter_entries(items, "nothing here") == []

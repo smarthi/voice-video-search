@@ -220,7 +220,7 @@ def search_corpus(
     top_k: int = 6,
     loaded: dict[str, dict[str, Any]] | None = None,
 ) -> list[Hit]:
-    """Fan out one query across indexed videos and merge (Sphere archive)."""
+    """Fan out one query across indexed videos and merge."""
     query = (query or "").strip()
     if not query:
         return []

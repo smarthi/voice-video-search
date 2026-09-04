@@ -1,7 +1,7 @@
 # On-prem ingest and retrieval — 50 PB design
 
 Status: design, not implemented in this repo.  
-Audience: platform / ML / Sightline engineers standing up Sphere-scale ingest and search.  
+Audience: platform / ML engineers standing up large-scale ingest and search.  
 Companion: the CPU prototype is [`CONFLUENCE.md`](CONFLUENCE.md). This page is the on-prem shape of the same object model.
 
 **Confluence import.** Paste `docs/CONFLUENCE_ONPREM.md`. Every diagram is embedded in the file as a base64 PNG, so the page needs no Mermaid macro, no attachments, and no outbound network access.
@@ -19,7 +19,7 @@ python3 scripts/inline_docs.py                         # regenerate the paste-in
 
 ## 1. Purpose and scope
 
-Ingest a 50 PB Sphere archive, cut each asset into ~20 s retrieval segments, embed and caption those segments concurrently, and write **one OpenSearch index** that serves **hybrid retrieval**: Qwen-VL k-NN on the segment still **and** BM25 on captions / OCR / transcript, in the same engine, in one query.
+Ingest a 50 PB archive, cut each asset into ~20 s retrieval segments, embed and caption those segments concurrently, and write **one OpenSearch index** that serves **hybrid retrieval**: Qwen-VL k-NN on the segment still **and** BM25 on captions / OCR / transcript, in the same engine, in one query.
 
 Two hard requirements drive every choice on this page:
 
@@ -43,7 +43,7 @@ Scope covers ingest through index write, plus the sharding and latency plan that
 | TransNetV2 | **FastAPI process pool, not vLLM** | Shot-boundary CNN on 48×27 frames. Not a generative model. |
 | Text encoder (BGE) | **Omit on day one** | BM25 is the lexical channel. Add a 384-d clause later only if synonym recall fails. |
 | Queue | **Apache Kafka**, or **Redpanda** if this is the first broker | True consumer groups: one topic, every segment delivered to **both** embed and caption. |
-| Object store | Existing Sphere / S3-compatible bucket | 50 PB of pixels stays put. The pipeline writes **proxy stills**, not 4K clones. |
+| Object store | Existing S3-compatible bucket | 50 PB of pixels stays put. The pipeline writes **proxy stills**, not 4K clones. |
 | Asset ledger | Postgres | `M of N` index-completeness counters per asset. Kafka is not the ledger, and Kafka offsets cannot answer this question (§13). |
 
 **Two headline findings.**
@@ -128,14 +128,14 @@ Either worker may win the create race. `doc_as_upsert` means whoever arrives fir
 
 ## 5. Pipeline, step by step
 
-1. **Ingest API** accepts an asset from Sphere: media URI, `source_class` (captured / produced / wrap), pack ids, rights, duration. Writes an asset row in Postgres as `pending`. Publishes one message to `vvs.assets`. Classification happens **here**, before the queue, so both consumers see the same label space.
+1. **Ingest API** accepts an asset from the source system: media URI, `source_class` (captured / produced / wrap), pack ids, rights, duration. Writes an asset row in Postgres as `pending`. Publishes one message to `vvs.assets`. Classification happens **here**, before the queue, so both consumers see the same label space.
 2. **Shot workers** (group `vvs.shots`, one in-flight decode per process) call `transnet-api`. Segment = **hard cut boundary + ~20 s time floor**. Extract one proxy still per segment plus the motion/flash sidecar from a mid-res decode — never from the 4K mezzanine. PUT stills to the durable bucket. Publish one `vvs.segments` message per segment. Record `segment_count = N`.
 3. **Embed group** and **caption group** each receive every segment.
 4. **Embed worker** calls `vllm-embed` on the still, runs RapidOCR on the same JPEG, `_update`s `visual_vector` + `ocr` + payload, increments `visual_done`, commits.
 5. **Caption worker** calls `vllm-instruct`, `_update`s `caption` on the same `_id`, writes the caption sidecar, increments `caption_done`, commits. Caption failure never blocks visual searchability.
 6. When `visual_done == segment_count`, Postgres marks the asset **searchable**. OpenSearch near-real-time refresh is ~1–5 s; use `refresh=wait_for` on the final upsert of an asset only if the UI must show it immediately.
 
-**Segment length is a design decision, not a TransNet output.** TransNet returns hard cuts. A Sphere fly-through with no cut is one shot until you floor it. The taxonomy retrieval unit is ~20 s; the laptop prototype uses an 8 s floor. §7.4 prices the difference.
+**Segment length is a design decision, not a TransNet output.** TransNet returns hard cuts. A long fly-through with no cut is one shot until you floor it. The taxonomy retrieval unit is ~20 s; the laptop prototype uses an 8 s floor. §7.4 prices the difference.
 
 ---
 
@@ -149,7 +149,7 @@ Index family: `vvs_captured_v1`, `vvs_produced_v1`, `vvs_wraps_v1` (see §8.2). 
 | --- | --- | --- | --- |
 | `visual_vector` | `knn_vector` 2048-d, faiss, hnsw, innerproduct, `mode: on_disk` | Embed | Qwen3-VL-Embedding-2B, L2-normalized |
 | `caption` | `text`, english analyzer | Caption | BM25 and X-Ray |
-| `ocr` | `text` | Embed | BM25. On-screen text; the Sphere mute path |
+| `ocr` | `text` | Embed | BM25. On-screen text; the mute path |
 | `transcript` | `text` | Later ASR group | BM25. Produced and wraps with a bed only |
 | `asset_id`, `source_class`, `rights`, `pack_ids` | `keyword` | Payload on first upsert | Filters, not vectors |
 | `wrap` | `boolean` | Payload | Suppressed for find-the-shot |
@@ -228,11 +228,11 @@ POST /vvs_captured_v1/_update/a1b2c3d4e5f6?retry_on_conflict=5
   "doc": {
     "visual_vector": [ "... 2048 floats ..." ],
     "ocr": "EXIT 14A",
-    "asset_id": "sph-2026-08-30-4412",
+    "asset_id": "ast-2026-08-30-4412",
     "source_class": "captured",
     "wrap": false,
     "rights": "internal",
-    "still_uri": "s3://sphere-proxies/sph-2026-08-30-4412/a1b2c3d4e5f6.jpg",
+    "still_uri": "s3://media-proxies/ast-2026-08-30-4412/a1b2c3d4e5f6.jpg",
     "t0": 340.0,
     "t1": 358.2,
     "shot_id": 17,
@@ -322,7 +322,7 @@ The third row is the actual gap. Trumpet and saxophone are not synonyms, so no s
 
 **Consequence.** On such a query the segment is ranked by visual k-NN alone. That is usually enough, since the picture channel is the primary channel by design. What is lost is the *redundancy*: when the frame is visually ambiguous, the prototype had a second channel voting for the right segment and this design does not.
 
-**Measure it instead of guessing.** Log, per query, whether the BM25 clause contributed any document to the final top-k. If removing the BM25 clause leaves the top-k unchanged for a material share of real Sphere queries, the text channel is not earning its keep and the gap is real.
+**Measure it instead of guessing.** Log, per query, whether the BM25 clause contributed any document to the final top-k. If removing the BM25 clause leaves the top-k unchanged for a material share of real production queries, the text channel is not earning its keep and the gap is real.
 
 **Fixes, in cost order:**
 
@@ -409,7 +409,7 @@ This is the strongest argument for the taxonomy's ~20 s retrieval unit, and the 
 
 The Qwen3 embedding family supports Matryoshka-style output truncation. If `Qwen3-VL-Embedding-2B` truncates cleanly to 1024 or 512 dimensions, every number above scales roughly linearly: 1024-d at 32x is `1.1 × (128 + 128) = 282` bytes/vector, and 1024-d also becomes eligible for the Lucene engine.
 
-Treat this as an **experiment gated on a judgment list**, not a plan assumption. Truncation changes the space, so it requires a full reindex. Measure recall@10 on Sphere queries before committing.
+Treat this as an **experiment gated on a judgment list**, not a plan assumption. Truncation changes the space, so it requires a full reindex. Measure recall@10 on production queries before committing.
 
 ---
 
@@ -447,7 +447,7 @@ A `wrap: false` filter inside one big index still touches every shard. Two alias
 
 ### 8.3 Routing
 
-Use **default routing**. Custom `_routing = asset_id` would confine a query to one shard, which only helps queries already scoped to a single title — and archive search is global by definition. Custom routing at this scale also risks hot shards, since Sphere asset durations vary by orders of magnitude.
+Use **default routing**. Custom `_routing = asset_id` would confine a query to one shard, which only helps queries already scoped to a single title — and archive search is global by definition. Custom routing at this scale also risks hot shards, since asset durations vary by orders of magnitude.
 
 The exception is a "more from this asset" panel. Add `"routing": asset_id` to **that** request only if profiling shows the fan-out matters. Correctness does not depend on it when documents are not routed at write time, so do not set write-time routing.
 
@@ -629,14 +629,14 @@ An optional delayed `vvs.segments.retry` topic avoids head-of-line blocking when
 
 ```json
 {
-  "asset_id": "sph-2026-08-30-4412",
-  "media_uri": "s3://sphere-mezz/2026/08/30/4412.mp4",
+  "asset_id": "ast-2026-08-30-4412",
+  "media_uri": "s3://media-mezz/2026/08/30/4412.mp4",
   "source_class": "captured",
   "pack_ids": ["nature"],
   "rights": "internal",
   "duration_s": 1842.0,
   "capture_ts": "2026-08-30T14:02:11Z",
-  "site_id": "sphere-lv",
+  "site_id": "site-01",
   "trace_id": "0af7651916cd43dd8448eb211c80319c"
 }
 ```
@@ -645,12 +645,12 @@ An optional delayed `vvs.segments.retry` topic avoids head-of-line blocking when
 
 ```json
 {
-  "asset_id": "sph-2026-08-30-4412",
+  "asset_id": "ast-2026-08-30-4412",
   "segment_id": "a1b2c3d4e5f6",
   "shot_id": 17,
   "t0": 340.0,
   "t1": 358.2,
-  "still_uris": ["s3://sphere-proxies/sph-2026-08-30-4412/a1b2c3d4e5f6.jpg"],
+  "still_uris": ["s3://media-proxies/ast-2026-08-30-4412/a1b2c3d4e5f6.jpg"],
   "motion_energy": 0.31,
   "flash_energy": 0.04,
   "source_class": "captured",
@@ -676,7 +676,7 @@ An optional delayed `vvs.segments.retry` topic avoids head-of-line blocking when
 
 Neither consumer re-opens the mezzanine. Both read the same proxy still URIs.
 
-OCR belongs in the embed worker. Captured Sphere content is mute, so if embed writes only `visual_vector`, BM25 has nothing for on-screen text and half the hybrid query is dead on the largest class.
+OCR belongs in the embed worker. Captured content is mute, so if embed writes only `visual_vector`, BM25 has nothing for on-screen text and half the hybrid query is dead on the largest class.
 
 ASR is a later group that `_update`s `transcript` on the same `_id`, for produced and wraps with a bed. It must never be required for the captured class.
 
@@ -716,7 +716,7 @@ Proxy stills are **durable**, not scratch. They are the retrieval citation. Garb
 
 | Prototype (`vvs`) | On-prem |
 | --- | --- |
-| `data/<id>/video.mp4` | Sphere mezzanine URI, never copied |
+| `data/<id>/video.mp4` | Source mezzanine URI, never copied |
 | TransNet in-process, 48×27 | `transnet-api`, same decode size |
 | 8 s floor in long takes | ~20 s floor, the taxonomy segment |
 | Qwen-VL embed in-process | `vllm-embed` |
@@ -765,7 +765,7 @@ Assumptions, both of which must be benchmarked before procurement (§16):
 | 1 month | 381 (~3,000 cores) | 76 | 10 | 1 |
 | 1 week | 1,653 (~13,000 cores) | 331 | 41 | 4 |
 
-A 3-month backfill on CPU decode means roughly **1,000 cores** — about 25–30 servers doing nothing but decoding. If that is unacceptable, move the shot tier to **GPU NVDEC**: 26 decode GPUs replace 1,000 CPU cores for the same window. Benchmark both on ten real Sphere assets before committing, because the answer changes the hardware order by an order of magnitude.
+A 3-month backfill on CPU decode means roughly **1,000 cores** — about 25–30 servers doing nothing but decoding. If that is unacceptable, move the shot tier to **GPU NVDEC**: 26 decode GPUs replace 1,000 CPU cores for the same window. Benchmark both on ten real production assets before committing, because the answer changes the hardware order by an order of magnitude.
 
 Run the backfill as its own consumer groups on the same topics (`vvs.embed.backfill`, `vvs.caption.backfill`) so it can be rate-limited and scaled to zero independently of live ingest, and so a bad backfill deploy cannot stall new content.
 
@@ -790,13 +790,13 @@ Note the GPU ratio: **more caption GPUs than embed GPUs**, the opposite of what 
 
 ## 16. Open items
 
-- **Benchmark two numbers on ten real Sphere assets before ordering hardware.** They dominate everything else on this page:
+- **Benchmark two numbers on ten real production assets before ordering hardware.** They dominate everything else on this page:
   1. **Average mezzanine bitrate** — swings the vector count and the whole OpenSearch cluster by 20x (§7.1).
   2. **Decode throughput per process, CPU versus NVDEC** — swings the backfill fleet between 26 GPUs and 1,000 CPU cores (§15.2).
-- Judgment list on real Sphere queries: RRF versus `min_max` with weights, and whether 32x recall holds or needs 16x.
+- Judgment list on real production queries: RRF versus `min_max` with weights, and whether 32x recall holds or needs 16x.
 - Whether Matryoshka truncation to 1024-d is lossless enough to halve the cluster (§7.5).
 - Whether the shot tier runs on CPU or GPU NVDEC, and whether NVDEC decode can share the caption GPUs.
-- `source_class`, rights, and wrap fields versus Sightline taxonomy inheritance — inherit, never copy.
+- `source_class`, rights, and wrap fields versus the existing taxonomy inheritance — inherit, never copy.
 - Produced-class ASR as a third consumer group writing `transcript`.
 - N-frame VLM windows as `_v2` (§10.1).
 - A tag ANN as a possible third hybrid clause, if controlled-vocabulary retrieval is required.

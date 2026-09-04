@@ -51,7 +51,7 @@ StageCallback = Callable[[str], None]
 
 
 def should_run_asr(media: Path, *, force_mute: bool | None = None) -> bool:
-    """ASR only when the file has audio and mute is not forced (Sphere default)."""
+    """ASR only when the file has audio and mute is not forced."""
     if force_mute is None:
         force_mute = load_settings().force_mute
     if force_mute:

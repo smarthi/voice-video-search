@@ -1,5 +1,5 @@
 flowchart LR
-  MEZZ[("Sphere mezzanine, 50 PB")] --> ING["Ingest API, FastAPI"]
+  MEZZ[("Source mezzanine, 50 PB")] --> ING["Ingest API, FastAPI"]
   ING --> TA["topic vvs.assets"]
   TA --> SW["Shot workers, group vvs.shots"]
   SW <--> TN["transnet-api, FastAPI process pool"]

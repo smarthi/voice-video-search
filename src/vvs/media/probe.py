@@ -1,4 +1,4 @@
-"""Lightweight media probes. Sphere assets are expected to have no audio track."""
+"""Lightweight media probes. Some assets are expected to have no audio track."""
 
 from __future__ import annotations
 

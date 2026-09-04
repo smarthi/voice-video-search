@@ -66,7 +66,7 @@ _STAGE_UI: dict[str, tuple[float, str]] = {
 _DEFAULT_HEADER = (
     "### Ask for a moment, not a file\n"
     "Analyze one or more videos, then ask by text (voice is optional if a file has audio). "
-    "One query searches the whole archive. Sphere-style mute video uses Qwen-VL + OCR."
+    "One query searches the whole archive. Mute video uses Qwen-VL + OCR."
 )
 
 
@@ -252,7 +252,7 @@ def launch(
             print(f"[app] delete refused: {exc}")
         return None, (None if current_scope == video_id else current_scope)
 
-    with gr.Blocks(title="Sightline · Voice Video Search", fill_width=True) as demo:
+    with gr.Blocks(title="Voice Video Search", fill_width=True) as demo:
         gr.HTML(TOPBAR_HTML)
         header = gr.Markdown(start_header, elem_classes=["sl-hero"])
         active_vid = gr.State(None)

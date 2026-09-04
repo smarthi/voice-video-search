@@ -72,7 +72,7 @@ def render_timeline(meta: IndexMeta, hits: list[Hit], width: int = 920, height: 
     pad = 16
     bar_y0, bar_y1 = 38, 54
     draw.rounded_rectangle((pad, bar_y0, width - pad, bar_y1), radius=2, fill=_LINE)
-    # Sightline coverage bar: red → coral wash along the rail
+    # Coverage bar: red → coral wash along the rail
     wash_w = max(8, (width - 2 * pad) // 5)
     draw.rectangle((pad, bar_y0, pad + wash_w, bar_y1), fill=(88, 18, 16))
     duration = max(meta.duration_s, 1.0)

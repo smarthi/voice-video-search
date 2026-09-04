@@ -20,12 +20,12 @@ On-prem scale-out — OpenSearch hybrid k-NN + BM25, sharding for a 50 PB archiv
 
 Turn one or more long-form videos into a searchable archive on a laptop.
 
-1. Pick any YouTube URL or local file (including mute Sphere-style video). Repeat for more titles.
+1. Pick any YouTube URL or local file (including mute video with no audio track). Repeat for more titles.
 2. Analyze once on CPU: stills, optional speech, Qwen-VL + BGE embeddings into per-video FAISS.
 3. Ask a question by typed text (voice is optional if a file has audio). **One query searches every indexed title.**
 4. Play the matching moments as clips, labeled by title, with the original still, real start–end timestamps, and a confidence score.
 
-This is a C-level demo, not a product. The rehearsed Lenovo CTO interview (`fBEGOk3ZHw4`) is an optional paste-in example. Index a second title (music video, Sphere mute clip) and the same Search box covers the whole archive.
+This is a C-level demo, not a product. A rehearsed CTO interview (`fBEGOk3ZHw4`) is an optional paste-in example. Index a second title (music video, mute clip) and the same Search box covers the whole archive.
 
 Production-shaped retrieval: visual-first ANN plus a text channel, ranked by comparable scores. This POC fans out across on-disk FAISS files. The on-prem design replaces that fan-out with one OpenSearch hybrid query — see §6.3.
 
@@ -35,12 +35,12 @@ Production-shaped retrieval: visual-first ANN plus a text channel, ranked by com
 
 | It is | It is not |
 | --- | --- |
-| A local prototype: ingest, index, query the **archive**, play clips | A full 50 PB Sphere deployment |
+| A local prototype: ingest, index, query the **archive**, play clips | A full 50 PB deployment |
 | Visual-first semantic search: Qwen-VL frames + BGE (OCR / captions / ASR if audio) | A keyword / filename scan |
 | On-disk FAISS ANN + SQLite payload (`visual.faiss`, `text.faiss` per video) | Embeddings loaded as a dense matrix in app RAM |
 | Archive merge by **absolute ANN scores** (picture + caption + transcript + OCR) | Ranking by per-video RRF “confidence” or query-word keep/drop |
 | A `VectorStore` interface with a Qdrant stub (`VVS_VECTOR_BACKEND=qdrant`) | The on-prem target, which is OpenSearch (§6.3) |
-| Gradio UI styled like Sightline (visual language only) | Sightline Sphere retrieval or any Sightline backend |
+| Gradio UI with a custom visual language | Any third-party retrieval service or backend |
 | CPU PyTorch (`pytorch-cpu` wheel index) | A GPU or cloud inference path |
 
 After Qwen-VL Embedding, BGE, and (if needed) Whisper / Instruct captioner weights are cached, query is fully local. Network is only required on first run (weights plus optional YouTube download).
@@ -108,7 +108,7 @@ uv run vvs warm
 uv run vvs app
 ```
 
-Force the Sphere-style mute path (skip Whisper even if the file has audio):
+Force the mute path (skip Whisper even if the file has audio):
 
 ```
 VVS_FORCE_MUTE=1 uv run vvs index --source /path/to/video.mp4 --shot-detect --scene-caption
@@ -132,13 +132,13 @@ Numbered pipeline:
 2. Probe — PyAV checks for an audio stream. No track (or `VVS_FORCE_MUTE=1`) skips ASR.
 3. Stills — default 2 fps + dHash + 4 s floor, **or** TransNetV2 shots (one still per cut, plus an 8 s floor in long takes). Same decode writes `motion_energy` / `flash_energy` (64×36 L1 and luma jump). A luma spike force-keeps the frame so lightning is not dropped. The VLM still embeds one JPEG — it does not see N frames.
 4. Optional ASR — faster-whisper `small` int8 only when audio exists. Native Whisper segments, not fixed tiles.
-5. OCR — RapidOCR on kept JPEGs. This is the Sphere-relevant on-screen text channel.
+5. OCR — RapidOCR on kept JPEGs. This is the on-screen text channel.
 6. Optional X-Ray — stills clustered into scenes; **Qwen3-VL-2B-Instruct** captions the representative still (BLIP fallback). Embedded with BGE as `modality="scene"`.
 7. Embed — **Qwen3-VL-Embedding-2B** on **one still** (2048-d, shared image/text space). BGE-small on OCR / transcript / captions (384-d). L2-normalized. CLIP ViT-B-32 (512-d) remains available for old indexes via `VVS_VISUAL_ENCODER=clip`. The official encode API also takes `{"video": frames, "fps", "max_frames"}` — **not used on this CPU box**. Later, on a GPU / larger server: one short window (~1 s, 6–8 frames) per kept still, same 2048-d collection. Do not smash the whole title into one vector.
 8. Vector store — two FAISS indexes **per video**, mmap’d from disk, plus SQLite payloads keyed by `vector_id`. Visual and text are separate spaces and are never mixed in one index. Do not smash CLIP 512 and Qwen 2048 into one FAISS file.
 9. Search — Qwen-VL (or CLIP) query vs each visual FAISS; BGE query vs each text FAISS; lexical IDF on ANN candidates; RRF **inside** a video; **archive merge by absolute ANN scores**; hydrate path / timestamp / quote / `asset_id` from SQLite.
 10. Clip extract — H.264 + AAC from **that** asset’s `video.mp4`. With speech: play the full supporting transcript (cap 60 s). Mute: the shot span, not ±2 s around a keyframe.
-11. UI — Gradio “Sightline · Voice Video Search”: three clip cards labeled by title, original stills, captions, gallery, match-density timeline.
+11. UI — Gradio “Voice Video Search”: three clip cards labeled by title, original stills, captions, gallery, match-density timeline.
 
 ### 4.2 Package and component view
 
@@ -347,7 +347,7 @@ Three facts worth carrying into any scale conversation:
 
 ## 7. Example video: 149 frames / 12 segments
 
-Example (optional): Bloomberg interview “Lenovo CTO on AI Product Rollout, Vision”
+Example (optional): a Bloomberg interview with a tech-company CTO on AI product strategy and vision
 
 `https://www.youtube.com/watch?v=fBEGOk3ZHw4` maps to `data/fBEGOk3ZHw4/`
 
@@ -363,7 +363,7 @@ Duration: 263.0 s. Not hardcoded.
 
 About 66 frames from the 4 s floor plus about 83 scene-change extras. Those 149 visual vectors live in `visual.faiss` (512-d if this tape was indexed with CLIP; 2048-d after a Qwen re-analyze).
 
-**12 transcript segments** — Whisper native turns (this file has audio). Typical 10–30 s Q&A chunks, 0.00–262.8 s. They are BGE-indexed in `text.faiss` together with OCR (and scene) rows. A mute Sphere file would have zero transcript segments and still be searchable via Qwen-VL + OCR / captions.
+**12 transcript segments** — Whisper native turns (this file has audio). Typical 10–30 s Q&A chunks, 0.00–262.8 s. They are BGE-indexed in `text.faiss` together with OCR (and scene) rows. A mute file would have zero transcript segments and still be searchable via Qwen-VL + OCR / captions.
 
 | # | Start–end | Topic (abridged) |
 | --- | --- | --- |
@@ -407,7 +407,7 @@ Code: `retrieve/search.py`. Visual FAISS is always on. Text FAISS holds OCR plus
 5. Temporal / anchor boosts apply only when `channels.asr` is true.
 6. Diversify: keep top-k frames at least 6 s apart (search `top_k=6`; UI plays 3).
 
-Confidence (0–100%) is CTO-facing, not a calibrated probability. It is the fused RRF score divided by the ceiling of the channels that actually ran. **Do not sort the archive by this number** — extra ASR extras inflate an interview’s ceiling, so Tolga would win mountain queries for the wrong reason.
+Confidence (0–100%) is CTO-facing, not a calibrated probability. It is the fused RRF score divided by the ceiling of the channels that actually ran. **Do not sort the archive by this number** — extra ASR extras inflate an interview’s ceiling, so the interview would win mountain queries for the wrong reason.
 
 ### 8.3 Across the archive
 
@@ -420,18 +420,18 @@ corpus_relevance = max( visual + 1.15×caption + 0.55×OCR,
                  + 0.45×motion/flash   # only if the query asks for that
 ```
 
-Picture path and spoken path compete (`max`), they are not summed. BGE-small cosine is ~0.65 on unrelated talk; adding transcript onto every interview made “trumpet” return Tolga over a saxophone still. A real spoken hit still wins max() against a random picture. Motion/flash are decode-time scalars, not a video transformer. “Moving tornado” boosts high `motion_energy`; “lightning” boosts `flash_energy`; a plain “tornado” query does not. **Re-analyze** to populate those fields. On a larger server, replace (or add) the still vector with an N-frame Qwen-VL window so “moving” lives in the embedding — same FAISS dim, opt-in Re-analyze. We do **not** keep-or-drop a title because a caption contains the query words. One strong title may take every slot.
+Picture path and spoken path compete (`max`), they are not summed. BGE-small cosine is ~0.65 on unrelated talk; adding transcript onto every interview made “trumpet” return the interview clip over a saxophone still. A real spoken hit still wins max() against a random picture. Motion/flash are decode-time scalars, not a video transformer. “Moving tornado” boosts high `motion_energy`; “lightning” boosts `flash_energy`; a plain “tornado” query does not. **Re-analyze** to populate those fields. On a larger server, replace (or add) the still vector with an N-frame Qwen-VL window so “moving” lives in the embedding — same FAISS dim, opt-in Re-analyze. We do **not** keep-or-drop a title because a caption contains the query words. One strong title may take every slot.
 
-Worked examples on a mixed archive (Tolga + Roja + Careless Whisper / Jennifer Connelly):
+Worked examples on a mixed archive (interview clip + Roja + Careless Whisper / Jennifer Connelly):
 
 | Query | First hit | Why |
 | --- | --- | --- |
-| `robotics` | Tolga ~3:01 | Spoken ANN (lexical-boosted) beats a music-video still |
+| `robotics` | Interview clip ~3:01 | Spoken ANN (lexical-boosted) beats a music-video still |
 | `clips with a trumpet` | Jennifer Connelly ~1:30 | Saxophone still + caption; interview ASR is unrelated |
 | `moving tornado` | High-motion funnel still | Same picture ANN; motion sidecar breaks the tie vs a parked tornado |
 | `lightning` | Force-kept luma-spike still | 2 fps / TransNet would otherwise skip a sub-second flash |
-| `snow-covered mountains` | Roja | Visual + caption ANN; Tolga never said that |
-| `what is hybrid AI` | Tolga 0–55 s | Transcript on the talking-head tape |
+| `snow-covered mountains` | Roja | Visual + caption ANN; the interview never said that |
+| `what is hybrid AI` | Interview clip 0–55 s | Transcript on the talking-head tape |
 
 Pin one file with `vvs query --video-id ID` (or `--source`). Mixed CLIP 512-d and Qwen 2048-d indexes in one archive still search, but their visual cosines are not perfectly comparable — re-analyze old CLIP titles on Qwen if you care about picture-vs-picture ties.
 
@@ -482,7 +482,7 @@ src/vvs/
   ingest/     YouTube + local file ingest
   media/      frames, shots (TransNetV2), motion/flash, clips, transcribe, ocr, scenes, caption
   retrieve/   embed, index, search, VectorStore (FAISS / Qdrant stub)
-  ui/         Gradio app, Sightline theme, timeline
+  ui/         Gradio app, custom theme, timeline
 scripts/      build_index.py, query.py, validate.py
 tests/        store / mute / shots / scenes / corpus (no VLM download)
 ```
@@ -492,7 +492,7 @@ tests/        store / mute / shots / scenes / corpus (no VLM download)
 | `ingest/` | Resolve YouTube id or local slug; download or copy to `video.mp4` |
 | `media/` | Keyframes, TransNet shots, optional Whisper, RapidOCR, scene cards, clip cut |
 | `retrieve/` | Qwen-VL or CLIP + BGE, FAISS write/mmap, per-video RRF, archive ANN merge, motion/flash boost |
-| `ui/` | Gradio + Sightline CSS (style only); Search calls `search_corpus` |
+| `ui/` | Gradio + custom CSS (style only); Search calls `search_corpus` |
 
 Public commands: `uv run vvs index`, `query`, `app`, `warm`, `list`.
 
@@ -513,7 +513,7 @@ uv run vvs app
 | Live UI | `uv run vvs app` |
 | Bind | `VVS_HOST` / `VVS_PORT` (default `0.0.0.0:7860`) |
 | Index talking-head | `uv run vvs index --source 'https://www.youtube.com/watch?v=…'` |
-| Mute Sphere index | `VVS_FORCE_MUTE=1 uv run vvs index --source /path/to/mute.mp4 --shot-detect --scene-caption` |
+| Mute video index | `VVS_FORCE_MUTE=1 uv run vvs index --source /path/to/mute.mp4 --shot-detect --scene-caption` |
 | Archive query | `uv run vvs query 'robotics'` |
 | Pin one title | `uv run vvs query --video-id fBEGOk3ZHw4 'what is hybrid AI'` |
 | Compare still counts | `uv run vvs list --compare cmp-2fps cmp-shots` |
@@ -534,12 +534,12 @@ Optional extra for a real Qdrant client: `uv sync --extra qdrant`.
 | First-run downloads | Qwen-VL Embedding + BGE + Whisper (if audio) + RapidOCR + optional Instruct / TransNetV2 + the video |
 | Analyze is minutes | OCR or VLM captioning is usually the slowest stage |
 | Visual is pictures | OCR / captions / transcript carry the words; Qwen-VL matches what the frame looks like |
-| Rehearse the questions | Five tuned queries hit the expected window in the top 3 on the Lenovo tape; `robotics` must beat a music-video still in an archive |
+| Rehearse the questions | Five tuned queries hit the expected window in the top 3 on the example tape; `robotics` must beat a music-video still in an archive |
 | This box indexes one (or a few) videos | The code path is add / mmap-search / hydrate — the same shape as a sharded store |
 | Mixed encoders | CLIP 512-d and Qwen 2048-d indexes can coexist; visual scores are not perfectly comparable until you re-analyze |
 | Mic / WSL | Use the Windows browser against localhost |
 
-Rehearsed queries (Lenovo CTO example only):
+Rehearsed queries (CTO example only):
 
 1. what is hybrid AI — 0–55 s
 2. show me the Motorola products and Kira — 110–140 s
@@ -547,7 +547,7 @@ Rehearsed queries (Lenovo CTO example only):
 4. robotics and cybersecurity research — 175–200 s
 5. agent-native devices voice and gesture interfaces — 196–260 s
 
-Archive check (needs a second indexed title, e.g. Roja): type `robotics` with no pin — Tolga at ~3:01 should be first.
+Archive check (needs a second indexed title, e.g. Roja): type `robotics` with no pin — the interview clip at ~3:01 should be first.
 
 If someone asks “does this scale to the real archive?”, the answer is §6.3 and [`CONFLUENCE_ONPREM.md`](CONFLUENCE_ONPREM.md): 50 PB of pixels is ~200 M segment vectors, which is a 6-node OpenSearch cluster once `mode: on_disk` quantization is used, because the pixels stay in object storage.
 
@@ -557,15 +557,15 @@ If someone asks “does this scale to the real archive?”, the answer is §6.3 
 
 `Settings.source` and `Settings.video_id` default to None. There is no baked-in YouTube URL.
 
-The same app indexes any other URL or upload, including mute Sphere content. `--source`, `--video-id`, and `VVS_*` only prefill the text box. Omit `--video-id` on `vvs query` to search the archive.
+The same app indexes any other URL or upload, including mute content. `--source`, `--video-id`, and `VVS_*` only prefill the text box. Omit `--video-id` on `vvs query` to search the archive.
 
 ---
 
-## 15. Sightline-inspired UI (visual language only)
+## 15. Custom UI (visual language only)
 
-`ui/theme.py` and `ui/theme.css` copy the Sightline Sphere look: Lenovo red `#E2231A`, ink neutrals, sphere/arcs mark, dark canvas `#05070C`. Window title: Sightline · Voice Video Search.
+`ui/theme.py` and `ui/theme.css` define a custom dark look: accent red `#E2231A`, ink neutrals, sphere/arcs mark, dark canvas `#05070C`. Window title: Voice Video Search.
 
-Style only. Retrieval, models, and storage are this repo. No Sightline service, index, or API is called.
+Style only. Retrieval, models, and storage are this repo. No external UI service, index, or API is called.
 
 ---
 

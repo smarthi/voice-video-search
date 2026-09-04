@@ -4,7 +4,7 @@ CPU-only prototype: analyze one or more YouTube URLs or local files, then ask by
 
 The source is never hardcoded. The app starts empty unless `data/` already has indexes — then Search is unlocked and one query covers every title.
 
-This is a visual-first retrieval demo shaped like production Sphere search. Each video keeps its own on-disk FAISS store (Qdrant-shaped for later). A query fans out across those stores and merges; it does not require one shared index. Sphere-style mute video is first-class — Whisper runs only when an audio track exists.
+This is a visual-first retrieval demo shaped like a production video search system. Each video keeps its own on-disk FAISS store (Qdrant-shaped for later). A query fans out across those stores and merges; it does not require one shared index. Mute video is first-class — Whisper runs only when an audio track exists.
 
 ## Workflow
 
@@ -20,9 +20,9 @@ Two loops: **analyze once**, then **ask many times**.
 
 Analyze is the expensive pass (download, decode, optional VLM). Search is local ANN + payload lookup. Existing `data/<id>/visual.faiss` is **reused** on Analyze. **Re-analyze** rebuilds from scratch.
 
-### Mute Sphere vs talking-head
+### Mute video vs talking-head
 
-| | Sphere / no audio | Interview with speech |
+| | Mute / no audio | Interview with speech |
 | --- | --- | --- |
 | Whisper | Skipped (no track, or `VVS_FORCE_MUTE=1`) | Runs |
 | Stills | TransNetV2 shots (opt-in) or 2 fps keyframes | Same |
@@ -212,13 +212,13 @@ corpus_relevance = max( visual + 1.15×caption + 0.55×OCR,
                  + 0.45×motion/flash   # only if the query asks for that
 ```
 
-Picture path and spoken path **compete**, they are not summed. BGE-small cosine is ~0.65 even on unrelated talk, so adding transcript onto every interview made “trumpet” return Tolga over Jennifer Connelly’s saxophone still. A real spoken hit (`robotics`, lexical-boosted ANN) still wins the max() against a random music-video picture. **Motion is a sidecar, not a VLM clip:** the encoder still sees one JPEG. Decode computes L1 / luma-jump on a 64×36 gray; lightning stills are force-kept. “Moving tornado” boosts high `motion_energy`; “lightning” boosts `flash_energy`; “tornado” does not. Old indexes default both scalars to 0 — **Re-analyze** to populate them. Per-video RRF **confidence** is only the UI badge. We do **not** keep-or-drop titles because a caption contains the query words. One strong title may take every slot. Pin one file with `vvs query --video-id ID`. Production is one visual collection + one text collection with `asset_id` in the payload — same ranker, no per-movie file walk.
+Picture path and spoken path **compete**, they are not summed. BGE-small cosine is ~0.65 even on unrelated talk, so adding transcript onto every interview made “trumpet” return the interview clip over Jennifer Connelly’s saxophone still. A real spoken hit (`robotics`, lexical-boosted ANN) still wins the max() against a random music-video picture. **Motion is a sidecar, not a VLM clip:** the encoder still sees one JPEG. Decode computes L1 / luma-jump on a 64×36 gray; lightning stills are force-kept. “Moving tornado” boosts high `motion_energy`; “lightning” boosts `flash_energy`; “tornado” does not. Old indexes default both scalars to 0 — **Re-analyze** to populate them. Per-video RRF **confidence** is only the UI badge. We do **not** keep-or-drop titles because a caption contains the query words. One strong title may take every slot. Pin one file with `vvs query --video-id ID`. Production is one visual collection + one text collection with `asset_id` in the payload — same ranker, no per-movie file walk.
 
 **FAISS + SQLite is not “SQLite does keywords.”** FAISS is the only ANN. SQLite is the payload sidecar (`vector_id` → path, `t_s`, `modality`, `text`, `shot_id`, `motion_energy`, `flash_energy`). Lexical ranking and the motion/flash boost run in Python on the ANN candidates only. There is no FTS5 / BM25 table. If FAISS never retrieved the row, those boosts never see it.
 
 **Why FAISS here / Qdrant later.** The app talks only to a `VectorStore` (`create`, `add`, `search`, `close`). `FaissStore` mmaps `*.faiss` and reads payload from SQLite. `QdrantStore` uses the same interface. A production cluster would use auto-sharding (`shard_number ≈ nodes`) in a single DC; custom `hash(asset_id) % N` only when every query is already scoped to one asset. Set `VVS_VECTOR_BACKEND=qdrant` and `VVS_QDRANT_URL` when a cluster exists.
 
-**Hybrid ranking.** Dense ANN alone can prefer generic “Lenovo / strategy” talk over a paragraph that actually says “robotics”. After ANN, hits that contain rare query terms get a lexical IDF boost (`0.14 × idf`), then RRF (`k=60`):
+**Hybrid ranking.** Dense ANN alone can prefer generic “corporate / strategy” talk over a paragraph that actually says “robotics”. After ANN, hits that contain rare query terms get a lexical IDF boost (`0.14 × idf`), then RRF (`k=60`):
 
 | Channel | Weight | When |
 | --- | --- | --- |
@@ -230,13 +230,13 @@ Picture path and spoken path **compete**, they are not summed. BGE-small cosine 
 
 Mute video: visual + OCR + scene. No time-anchor boosts.
 
-That table is **inside one video**. The UI confidence badge is RRF / ceiling. Archive order uses `corpus_relevance` above, not that badge. Examples: `robotics` → Tolga ~3:01; `clips with a trumpet` → Careless Whisper / Jennifer Connelly saxophone still; `snow-covered mountains` → Roja; `moving tornado` prefers the high-motion still of the same funnel.
+That table is **inside one video**. The UI confidence badge is RRF / ceiling. Archive order uses `corpus_relevance` above, not that badge. Examples: `robotics` → interview clip ~3:01; `clips with a trumpet` → Careless Whisper / Jennifer Connelly saxophone still; `snow-covered mountains` → Roja; `moving tornado` prefers the high-motion still of the same funnel.
 
 **X-Ray scene cards.** The visual embedder does not write English. When captions are on, stills are grouped (TransNet shots if present, else embedding cosine / dHash, 24 s cap). **Qwen3-VL-2B-Instruct** captions the representative still and lists objects (`VVS_SCENE_CAPTION_MODEL=qwen_vl`). That is a second checkpoint from the embedder — Instruct generates text; Embedding only writes vectors. **BLIP-base** is the fallback if Instruct fails, and the run falls back **once** rather than once per scene. Cards live in `meta.json` and are BGE-embedded as `modality="scene"`. Query time only does a playhead lookup plus ANN — the captioner does not run again.
 
 Captioning uses the same device and precision as the embedder (see **Device** above), which matters more here than anywhere else: captioning is autoregressive, so each scene costs up to `QWEN_MAX_TOKENS` sequential forward passes rather than the single pass an embedding needs. If a caption model fails to load on the GPU, the session pins itself to CPU exactly as the encoder does.
 
-**TransNetV2 shots.** Mute Sphere video does not need a visual vector every 2 fps. TransNetV2 finds hard cuts on 48×27 frames (PyAV, no ffmpeg CLI). Each shot keeps one still, plus another every `VVS_SHOT_MAX_GAP_S` (default 8 s) so a long take is not a single embedding. The same 48×27 stack yields `motion_energy` / `flash_energy`; luma spikes add extra stills so lightning is not dropped. `shot_id` is stored on the keyframe and in the FAISS payload for citations. Mute clips use the shot span, not ±2 s around a keyframe. If TransNetV2 fails, analyze falls back to the 2 fps path.
+**TransNetV2 shots.** Mute video does not need a visual vector every 2 fps. TransNetV2 finds hard cuts on 48×27 frames (PyAV, no ffmpeg CLI). Each shot keeps one still, plus another every `VVS_SHOT_MAX_GAP_S` (default 8 s) so a long take is not a single embedding. The same 48×27 stack yields `motion_energy` / `flash_energy`; luma spikes add extra stills so lightning is not dropped. `shot_id` is stored on the keyframe and in the FAISS payload for citations. Mute clips use the shot span, not ±2 s around a keyframe. If TransNetV2 fails, analyze falls back to the 2 fps path.
 
 TransNetV2 is **shot-boundary** detection (cuts / fades), not semantic “this is a concert.” Object crops (`segment_id`) are a later pass on these stills, not on every raw frame.
 
@@ -312,7 +312,7 @@ uv run vvs index --source 'https://www.youtube.com/watch?v=fBEGOk3ZHw4'
 uv run vvs index --source /path/to/talk.mp4 --video-id my-talk
 ```
 
-Mute Sphere-style (shots + no Whisper + optional captions):
+Mute video (shots + no Whisper + optional captions):
 
 ```bash
 VVS_FORCE_MUTE=1 uv run vvs index --source /path/to/mute.mp4 --shot-detect --scene-caption
@@ -325,12 +325,12 @@ Flags match the UI checkboxes: `--shot-detect` / `--no-shot-detect`, `--scene-ca
 
 ### Query
 
-One query searches **every** indexed video (Sphere archive). Pass `--video-id` to pin one title.
+One query searches **every** indexed video (whole archive). Pass `--video-id` to pin one title.
 
 ```bash
 uv run vvs query 'red car in the tunnel'
 uv run vvs query --all 'product on stage'
-uv run vvs query --video-id fBEGOk3ZHw4 'what is lenovo approach to robotics'
+uv run vvs query --video-id fBEGOk3ZHw4 'what is the approach to robotics'
 ```
 
 ### List indexes
@@ -362,7 +362,7 @@ compare visual: 149 → 41  ·  108 fewer visual embeddings (72% less)
 
 `vvs list` prints those columns for every index under `data/`. After a single analyze, the last log line already has `frames` / `shots`. In `meta.json`, `frames` is the embedding list; `shots` is non-empty only when TransNetV2 ran.
 
-For a mute Sphere clip, add `VVS_FORCE_MUTE=1` on both index commands so Whisper does not change the text side of the comparison.
+For a mute clip, add `VVS_FORCE_MUTE=1` on both index commands so Whisper does not change the text side of the comparison.
 
 ## Example demo video
 
@@ -384,7 +384,7 @@ Rehearsed questions (top-3 window):
 uv run python scripts/validate.py --video-id fBEGOk3ZHw4 --write-demo
 ```
 
-This interview is a talking-head check. Real Sphere content is mute and multi-title: index two files, then `vvs query 'red car'` with no `--video-id`. Use `--shot-detect` and visual / caption queries.
+This interview is a talking-head check. Real archive content is mute and multi-title: index two files, then `vvs query 'red car'` with no `--video-id`. Use `--shot-detect` and visual / caption queries.
 
 ## On-disk layout
 
@@ -412,7 +412,7 @@ src/vvs/
   ingest/     YouTube + local ingest
   media/      frames, shots (TransNetV2), motion/flash, clips, transcribe, ocr, scenes, caption
   retrieve/   embed, index, search, reembed, VectorStore (FAISS / Qdrant)
-  ui/         Gradio + Sightline theme + library grid
+  ui/         Gradio + custom theme + library grid
 tests/        store / mute / shots / scenes / corpus / motion / library (no VLM download)
 ```
 
