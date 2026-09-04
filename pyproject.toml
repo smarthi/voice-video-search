@@ -5,6 +5,7 @@ description = "CPU-only, offline voice-queried video frame retrieval demo"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "accelerate>=1.14.0",
     "av>=14.0.0",
     "einops>=0.8.0",
     "faiss-cpu>=1.10.0",

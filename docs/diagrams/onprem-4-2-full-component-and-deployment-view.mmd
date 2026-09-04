@@ -1,0 +1,23 @@
+flowchart LR
+  MEZZ[("Sphere mezzanine, 50 PB")] --> ING["Ingest API, FastAPI"]
+  ING --> TA["topic vvs.assets"]
+  TA --> SW["Shot workers, group vvs.shots"]
+  SW <--> TN["transnet-api, FastAPI process pool"]
+  SW --> PROX[("Object store: proxy stills, caption sidecars")]
+  SW --> TS["topic vvs.segments"]
+  TS --> EW["Embed workers, group vvs.embed, OCR in process"]
+  TS --> CW["Caption workers, group vvs.caption"]
+  EW <--> VE["vllm-embed: Qwen3-VL-Embedding-2B"]
+  CW <--> VI["vllm-instruct: Qwen3-VL-2B-Instruct"]
+  EW --> OS[("OpenSearch: vvs_captured, vvs_produced, vvs_wraps")]
+  CW --> OS
+  CW --> PROX
+  EW --> DLQ["topics vvs.embed.dlq, vvs.caption.dlq"]
+  CW --> DLQ
+  ING --> PG[("Postgres: assets, segments, completeness counters")]
+  EW --> PG
+  CW --> PG
+  QAPI["Query API, FastAPI"] --> VE
+  QAPI --> COORD["OpenSearch coordinator nodes"]
+  COORD --> OS
+  QAPI --> PROX

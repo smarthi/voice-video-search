@@ -1,0 +1,21 @@
+sequenceDiagram
+  participant U as Client
+  participant Q as Query API
+  participant V as vllm-embed
+  participant C as OpenSearch coordinator
+  participant S as Data shards
+  participant O as Object store
+
+  U->>Q: clips with a trumpet
+  Q->>V: embed query text in the same 2048-d space
+  V-->>Q: query vector, 15 to 40 ms
+  Q->>C: hybrid query, knn clause plus BM25 clause, pre-filter
+  C->>S: fan out both clauses to every shard
+  S->>S: binary quantized graph traversal, ef_search 100
+  S->>S: rescore top candidates with fp32 from NVMe
+  S-->>C: per-shard top k, 20 to 60 ms
+  C->>C: RRF score-ranker-processor
+  C-->>Q: top 50 with visual_vector excluded
+  Q->>O: signed URLs for the three played stills
+  O-->>Q: URLs
+  Q-->>U: ranked segments, p95 under 300 ms

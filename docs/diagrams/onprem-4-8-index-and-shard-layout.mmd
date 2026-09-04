@@ -1,0 +1,9 @@
+flowchart TB
+  AL["alias vvs_search: the find-the-shot query"] --> IC["vvs_captured_v1, 24 primaries"]
+  AL --> IP["vvs_produced_v1, 6 primaries"]
+  ALL["alias vvs_search_all: host, zone, sync queries"] --> IC
+  ALL --> IP
+  ALL --> IW["vvs_wraps_v1, 2 primaries"]
+  IC --> N["6 data nodes, about 11 shards each, primary and replica never co-located"]
+  IP --> N
+  IW --> N

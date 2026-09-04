@@ -1,0 +1,24 @@
+flowchart TB
+  SRC["YouTube URL or local file"] --> ING["Ingest: yt-dlp or copy to data/id/video.mp4"]
+  ING --> PROBE["Probe audio stream with PyAV"]
+  PROBE --> SHOTS{"--shot-detect?"}
+  SHOTS -->|yes| TN["TransNetV2 on 48x27 frames, one still per cut, 8 s floor"]
+  SHOTS -->|no| TWO["2 fps sample, dHash dedupe, 4 s floor"]
+  TN --> MO["Same decode: motion_energy and flash_energy on 64x36"]
+  TWO --> MO
+  MO --> FK["Force-keep on luma spike so lightning survives"]
+  FK --> JPG[("data/id/frames/*.jpg")]
+  PROBE --> ASR{"audio track and not VVS_FORCE_MUTE?"}
+  ASR -->|yes| WH["faster-whisper small int8, native segments"]
+  ASR -->|no| MUTE["Skip ASR, mute Sphere path"]
+  JPG --> OCR["RapidOCR on kept stills"]
+  JPG --> SC{"--scene-caption?"}
+  SC -->|yes| CAP["Qwen3-VL-2B-Instruct captions the representative still"]
+  JPG --> QV["Qwen3-VL-Embedding-2B, 2048-d, one JPEG"]
+  QV --> VF[("visual.faiss + visual.sqlite")]
+  OCR --> BGE["BGE-small, 384-d"]
+  WH --> BGE
+  CAP --> BGE
+  BGE --> TF[("text.faiss + text.sqlite")]
+  VF --> META[("meta.json, timings.json")]
+  TF --> META

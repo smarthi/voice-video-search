@@ -48,11 +48,22 @@ class Settings(BaseSettings):
     )
     visual_encoder: str = Field(
         default="qwen_vl",
-        description="qwen_vl (Qwen3-VL-Embedding) or clip (open_clip ViT-B-32).",
+        description=(
+            "qwen_vl (Qwen3-VL-Embedding), wemm (tencent/WeMM-Embedding), "
+            "or clip (open_clip ViT-B-32)."
+        ),
     )
     visual_model: str = Field(
         default="Qwen/Qwen3-VL-Embedding-2B",
         description="HF id. qwen-vl-emb-4B aliases to the official 2B VL embedder.",
+    )
+    visual_truncate_dim: int | None = Field(
+        default=None,
+        description=(
+            "Matryoshka output width for WeMM (64/128/256/512/1024/native). "
+            "256 keeps ~98.7% of MMEB-v2 image and video score at 8x less index. "
+            "Ignored by encoders that are not Matryoshka-trained."
+        ),
     )
 
 

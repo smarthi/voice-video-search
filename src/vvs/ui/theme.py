@@ -41,7 +41,44 @@ SIGHTLINE_INK = Color(
     c950="#05070C",
 )
 
-HEAD = """<meta name="theme-color" content="#05070C">"""
+# Library preview behaviour. Registered from `head` rather than Blocks' `js=`
+# hook: that hook evaluates its payload as statements, so passing a function
+# expression there silently defines and discards it. Listeners are delegated on
+# `document` because the grid is re-rendered as raw HTML whenever the archive
+# changes, which would throw away per-element handlers.
+_LIBRARY_JS = """
+<script>
+(() => {
+  const tile = (event) => {
+    const video = event.target;
+    if (!(video instanceof HTMLVideoElement)) return null;
+    return video.classList.contains('sl-lib-vid') ? video : null;
+  };
+  document.addEventListener('mouseover', (event) => {
+    const video = tile(event);
+    if (!video) return;
+    video.muted = true;
+    video.play().catch(() => {});
+  }, true);
+  document.addEventListener('mouseout', (event) => {
+    const video = tile(event);
+    if (!video) return;
+    video.pause();
+    video.currentTime = 0;
+  }, true);
+  // Touch devices never hover, so a tap toggles playback instead.
+  document.addEventListener('click', (event) => {
+    const video = tile(event);
+    if (!video) return;
+    video.muted = true;
+    if (video.paused) video.play().catch(() => {});
+    else video.pause();
+  }, true);
+})();
+</script>
+"""
+
+HEAD = '<meta name="theme-color" content="#05070C">' + _LIBRARY_JS
 FORCE_DARK_JS = "document.documentElement.classList.add('dark');"
 
 TOPBAR_HTML = """

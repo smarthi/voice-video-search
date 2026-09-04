@@ -58,6 +58,32 @@ query  → Qwen-VL text + BGE query
 
 **Visual encoder.** Default is `Qwen/Qwen3-VL-Embedding-2B` (shared image/text space, 2048-d). Official VL embedding sizes are **2B** and **8B** only — there is no Qwen-VL-Embedding-4B (`Qwen3-Embedding-4B` is text-only). `VVS_VISUAL_MODEL=qwen-vl-emb-4B` aliases to the 2B VL model and logs that. CLIP ViT-B-32 remains available via `VVS_VISUAL_ENCODER=clip` so existing 512-d indexes still search. Switching encoder requires **Re-analyze**.
 
+**WeMM as an alternative encoder.** `VVS_VISUAL_ENCODER=wemm` selects the WeMM
+embedding family (`wemm-2b` 2048-d, `wemm-4b` 2560-d, `wemm-9b` 4096-d), which
+uses `encode_query` / `encode_document` instead of Qwen's prompt argument. WeMM
+is Matryoshka-trained, so `VVS_VISUAL_TRUNCATE_DIM` can shorten vectors to a
+supported width to trade recall for index size.
+
+Note that WeMM-2B and Qwen-VL-Embedding-2B are **both 2048-d**, so dimension
+alone cannot identify an index. Indexes therefore record `models.visual_encoder`
+in `meta.json`, and encoder detection reads that field first, falling back to the
+model name and only then to dimension. Do not reintroduce dimension-first
+inference: it silently mismatches the two 2048-d families.
+
+To compare encoders on identical inputs, `retrieve/reembed.py` clones an existing
+index and re-encodes only the visual channel, reusing the same keyframes,
+transcript and OCR. `scripts/compare_encoders.py` then scores the two indexes
+against each other (recall@k, MRR, nDCG when timestamp judgments exist; rank
+overlap and Spearman agreement when they do not, plus encode and search latency).
+
+**Measured CPU cost (this laptop, 4 frames after warmup).** Qwen-VL-Embedding-2B
+28.3 s/frame; WeMM-Embedding-2B 72.8 s/frame — **2.6× slower** for the same
+2048-d output. Text queries are comparable (9.8 s vs 10.2 s). At that rate,
+re-embedding the 1,332-frame sample archive with WeMM is ~27 hours, so the
+**quality A/B is deferred to a GPU box**; the re-embed and comparison harness are
+ready to run there unchanged. Both models emit 2048-d L2-normalized vectors,
+which is exactly why `models.visual_encoder` has to be recorded per index.
+
 **Archive search.** Each video keeps its own `visual.faiss` (POC fan-out). A query embeds once, searches every store, then **merges by absolute ANN scores**:
 
 ```text
@@ -122,6 +148,27 @@ Open the printed `http://127.0.0.1:7860` URL from Windows. Then:
 2. Optional analyze options (independent — check **both** to run in one pass): **Group shots with TransNetV2**, then **Describe scenes** (Qwen3-VL-2B-Instruct captions those shot-grouped scenes).
 3. Click **Analyze video**. Repeat for a second title if you want archive hits from more than one file.
 4. Type a question → **Search**. That query searches **every** indexed video. Clips are labeled by title. Mic is optional and only useful when a file has speech.
+
+#### 00 · Library
+
+The top section lists every indexed video as a card: a preview clip, title, id,
+duration, and chips for keyframes, spoken segments (or `mute`), OCR, X-Ray scenes
+and shots, plus the encoder that built the index. Cards flag `video file missing`
+when `video.mp4` is gone, which is what a half-cleaned directory looks like.
+
+- **Hover** a tile to play its preview; leaving rewinds it. Tap toggles on touch.
+- **Search this** narrows every subsequent query to that one video, and the card
+  gets a red ring. **Search whole archive** widens it again.
+- **Filter** matches title or id. **Sort** by recency, title, duration or keyframes.
+- **Delete** is two-step: the card swaps to **Cancel** / **Confirm delete**, and
+  confirming removes that `data/<id>/` directory for good.
+
+Previews are cut once and cached as `data/<id>/preview.mp4`: 6 s, 480px wide,
+15 fps, silent, roughly 20–350 KB each. For videos with speech the cut starts at
+the first transcript segment past the first 8% so a talk opens on someone
+talking rather than a title card; mute assets use a fixed offset. Tiles are
+`preload="none"`, so a full grid downloads no video until you hover one. Build
+them for a whole archive up front with **Build previews** (14 videos took ~9 s).
 
 Prefill without auto-analyze:
 
@@ -229,6 +276,7 @@ Outputs in `data/<video_id>/`:
 | `video.mp4` | Ingested source |
 | `frames/` | Representative JPEGs (2 fps set, or TransNet stills) |
 | `clips/` | On-demand H.264 hits |
+| `preview.mp4` | Cached 6 s library preview (silent, 480px). Outside `clips/` on purpose — `attach_clips` prunes foreign names there |
 | `visual.faiss` / `visual.sqlite` | Qwen-VL ANN + payload (`asset_id`, `shot_id`, path, `t_s`, `motion_energy`, `flash_energy`) |
 | `text.faiss` / `text.sqlite` | BGE ANN + payload (OCR / transcript / scene) |
 | `meta.json` | Title, duration, frames, shots, transcript, OCR, scene cards, channels |
@@ -243,9 +291,9 @@ src/vvs/
   cli.py config.py models.py paths.py
   ingest/     YouTube + local ingest
   media/      frames, shots (TransNetV2), motion/flash, clips, transcribe, ocr, scenes, caption
-  retrieve/   embed, index, search, VectorStore (FAISS / Qdrant)
-  ui/         Gradio + Sightline theme
-tests/        store / mute / shots / scenes / corpus / motion (no VLM download)
+  retrieve/   embed, index, search, reembed, VectorStore (FAISS / Qdrant)
+  ui/         Gradio + Sightline theme + library grid
+tests/        store / mute / shots / scenes / corpus / motion / library (no VLM download)
 ```
 
 Commands: `uv run vvs index|query|app|warm|list`.
@@ -267,8 +315,9 @@ Commands: `uv run vvs index|query|app|warm|list`.
 | `VVS_SHOT_DETECT` | TransNetV2 shot grouping; embed representatives only |
 | `VVS_SHOT_THRESHOLD` | Cut threshold (default `0.5`) |
 | `VVS_SHOT_MAX_GAP_S` | Extra still every N seconds inside a long shot (default `8`) |
-| `VVS_VISUAL_ENCODER` | `qwen_vl` (default) or `clip` (old 512-d indexes) |
-| `VVS_VISUAL_MODEL` | HF id or alias (`qwen-vl-emb-4B` → official 2B VL; `8b` → 8B) |
+| `VVS_VISUAL_ENCODER` | `qwen_vl` (default), `wemm`, or `clip` (old 512-d indexes) |
+| `VVS_VISUAL_MODEL` | HF id or alias (`qwen-vl-emb-4B` → official 2B VL; `8b` → 8B; `wemm-2b` / `wemm-4b` / `wemm-9b`) |
+| `VVS_VISUAL_TRUNCATE_DIM` | Matryoshka width for WeMM only; must be a supported dim |
 
 Search weights live in `retrieve/search.py` (not env): per-video RRF (`TEXT_WEIGHT` 1.6, `OCR_WEIGHT` 0.6, `SCENE_WEIGHT` 1.0) and archive merge (`SCENE_ANN_WEIGHT` 1.15, `TEXT_ANN_WEIGHT` 1.4, `OCR_ANN_WEIGHT` 0.55, `LEXICAL_BLEND` 0.2, `MOTION_BLEND` 0.45). Motion/flash keep thresholds are in `media/motion.py` (`FLASH_KEEP` 0.22, `MOTION_KEEP` 0.18).
 

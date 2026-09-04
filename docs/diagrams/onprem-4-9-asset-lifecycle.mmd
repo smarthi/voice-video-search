@@ -1,0 +1,10 @@
+stateDiagram-v2
+  [*] --> pending: ingest accepted
+  pending --> segments_ready: shot worker published N segments
+  segments_ready --> visual_partial: first visual upsert
+  visual_partial --> searchable: visual_done equals N
+  visual_partial --> blocked: required segment in embed DLQ
+  blocked --> visual_partial: operator replay
+  searchable --> caption_complete: caption_done equals N
+  caption_complete --> [*]
+  searchable --> [*]: caption optional

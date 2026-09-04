@@ -1,0 +1,9 @@
+flowchart LR
+  SRC[("Sphere data source, 50 PB")] --> ING["Ingest API"]
+  ING --> PIPE["Ingest pipeline: cut, embed, caption"]
+  PIPE --> OS[("OpenSearch vvs_segments")]
+  PIPE --> OBJ[("Object store: mezzanine + proxy stills")]
+  U["Producer / editor / Sightline UI"] --> QAPI["Query API"]
+  QAPI --> EMB["vLLM Qwen-VL-Embedding"]
+  QAPI --> OS
+  QAPI --> OBJ

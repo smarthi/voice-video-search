@@ -25,6 +25,15 @@ def clips_dir(video_id: str) -> Path:
     return video_dir(video_id) / "clips"
 
 
+def preview_path(video_id: str) -> Path:
+    """Short silent preview for the library grid.
+
+    Deliberately outside `clips/`: `attach_clips` garbage-collects anything in
+    that directory whose name does not match its own `clip_<tag>_...` pattern.
+    """
+    return video_dir(video_id) / "preview.mp4"
+
+
 def index_path(video_id: str) -> Path:
     """Legacy NumPy archive. New indexes use FAISS files; this is migrate-only."""
     return video_dir(video_id) / "index.npz"

@@ -1,0 +1,10 @@
+stateDiagram-v2
+  [*] --> delivered
+  delivered --> upserted: vLLM and OpenSearch ok
+  delivered --> transient: timeout, 5xx, conflict
+  transient --> delivered: in-process backoff, attempt under 5
+  transient --> poison: attempt reaches 5
+  poison --> dlq: produce to vvs.embed.dlq or vvs.caption.dlq
+  upserted --> committed: commit offset
+  dlq --> committed: commit offset so the partition unblocks
+  committed --> [*]

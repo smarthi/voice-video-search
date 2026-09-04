@@ -32,10 +32,17 @@ from vvs.paths import (
     index_path,
     meta_path,
     timings_path,
+    video_dir,
     video_path,
     visual_faiss_path,
 )
-from vvs.retrieve.embed import embed_bge_texts, embed_clip_images, visual_dim, visual_model_label
+from vvs.retrieve.embed import (
+    embed_bge_texts,
+    embed_clip_images,
+    encoder_kind,
+    visual_dim,
+    visual_model_label,
+)
 from vvs.retrieve.store import VectorPayload, open_store, visual_store_exists
 
 StageCallback = Callable[[str], None]
@@ -236,6 +243,7 @@ def build_index(
             caption=caption_model,
             shot="TransNetV2" if shots else None,
             visual_dim=vdim,
+            visual_encoder=encoder_kind(settings=settings),
         ),
         vector_backend=settings.vector_backend,
     )
@@ -293,11 +301,16 @@ def load_index(video_id: str) -> dict[str, Any]:
     # Store dim is source of truth (meta can lag after a crashed Qwen write).
     if getattr(visual, "dim", 0) and meta.models.visual_dim != visual.dim:
         meta.models.visual_dim = int(visual.dim)
-        if visual.dim != 512 and (
+        stale_clip_label = visual.dim != 512 and (
             "open_clip" in (meta.models.clip or "").lower()
             or "vit-b-32" in (meta.models.clip or "").lower()
-        ):
+        )
+        # Only adopt the configured label when it actually produces this width;
+        # otherwise we would stamp (say) a WeMM name onto a Qwen-written store.
+        if stale_clip_label and visual_dim(settings=settings) == int(visual.dim):
             meta.models.clip = visual_model_label(settings=settings)
+        if not meta.models.visual_encoder:
+            meta.models.visual_encoder = encoder_kind(meta=meta)
         meta_path(video_id).write_text(meta.model_dump_json(indent=2), encoding="utf-8")
         print(f"[index] healed {video_id} meta visual_dim={visual.dim}")
     text = None
@@ -484,6 +497,25 @@ def _duration(media: Path, frames, segments) -> float:
         pass
     ends = [float(f.t_s) for f in frames] + [float(s.end_s) for s in segments]
     return max(ends) if ends else 0.0
+
+
+def delete_index(video_id: str) -> bool:
+    """Remove one asset's directory, including frames, stores and preview.
+
+    Guarded so a stray id can never escape the data root: the target must be a
+    direct child of it. Returns False when there was nothing to delete.
+    """
+    import shutil
+
+    root = DATA_ROOT.resolve()
+    target = video_dir(video_id).resolve()
+    if target == root or target.parent != root:
+        raise SystemExit(f"refusing to delete {target}: not a direct child of {root}")
+    if not target.exists():
+        return False
+    shutil.rmtree(target)
+    print(f"[index] deleted {target}")
+    return True
 
 
 def list_indexed() -> list[str]:

@@ -1,7 +1,13 @@
-"""Visual encoder (Qwen3-VL-Embedding by default) plus BGE text. CPU only.
+"""Visual encoders (Qwen3-VL-Embedding, WeMM-Embedding, open_clip) plus BGE text. CPU only.
 
 Official Qwen VL embedding sizes are 2B (2048-d) and 8B (4096-d). There is no
 4B VL embedder — Qwen3-Embedding-4B is text-only. `qwen-vl-emb-4B` aliases to 2B.
+
+WeMM-Embedding (Tencent, Apache-2.0) is a drop-in alternative built on Qwen3.5.
+It is Matryoshka-trained, so its output may be truncated to any dimension listed
+in `_WEMM_MRL_DIMS` and renormalized. Note that WeMM-2B and Qwen-VL-2B are both
+2048-d: vector width alone cannot identify which model wrote an index, which is
+why `ModelCard.visual_encoder` is recorded and `encoder_kind` prefers it.
 """
 
 from __future__ import annotations
@@ -16,9 +22,27 @@ from vvs.config import load_settings
 
 QWEN_VL_2B = "Qwen/Qwen3-VL-Embedding-2B"
 QWEN_VL_8B = "Qwen/Qwen3-VL-Embedding-8B"
+WEMM_2B = "tencent/WeMM-Embedding-2B"
+WEMM_4B = "tencent/WeMM-Embedding-4B"
+WEMM_9B = "tencent/WeMM-Embedding-9B"
 CLIP_NAME = "open_clip ViT-B-32 laion2b_s34b_b79k"
+
 _QUERY_PROMPT = "Retrieve video frames that match this query."
 _FRAME_PROMPT = "Represent the video frame for retrieval."
+# WeMM takes the instruction as a `text` item alongside the image, and supplies
+# the query-side instruction itself via `encode_query`. Wording follows the model
+# card so we stay inside the distribution it was tuned on.
+_WEMM_FRAME_PROMPT = "Represent this image."
+_WEMM_VIDEO_PROMPT = "Represent this video."
+
+ENCODER_KINDS = ("qwen_vl", "wemm", "clip")
+
+_WEMM_NATIVE_DIM = {WEMM_2B: 2048, WEMM_4B: 2560, WEMM_9B: 4096}
+_WEMM_MRL_DIMS = {
+    WEMM_2B: (64, 128, 256, 512, 1024, 2048),
+    WEMM_4B: (64, 128, 256, 512, 1024, 2560),
+    WEMM_9B: (64, 128, 256, 512, 1024, 2048, 4096),
+}
 
 _MODEL_ALIASES = {
     "qwen-vl-emb-4b": QWEN_VL_2B,
@@ -29,6 +53,16 @@ _MODEL_ALIASES = {
     "8b": QWEN_VL_8B,
     "qwen": QWEN_VL_2B,
     "qwen_vl": QWEN_VL_2B,
+    "wemm": WEMM_2B,
+    "wemm_2b": WEMM_2B,
+    "wemm-2b": WEMM_2B,
+    "wemm-embedding-2b": WEMM_2B,
+    "wemm_4b": WEMM_4B,
+    "wemm-4b": WEMM_4B,
+    "wemm-embedding-4b": WEMM_4B,
+    "wemm_9b": WEMM_9B,
+    "wemm-9b": WEMM_9B,
+    "wemm-embedding-9b": WEMM_9B,
 }
 
 
@@ -36,35 +70,88 @@ def resolve_visual_model(name: str | None) -> str:
     raw = (name or QWEN_VL_2B).strip()
     mapped = _MODEL_ALIASES.get(raw.lower())
     if mapped:
-        if "4b" in raw.lower():
+        if "4b" in raw.lower() and mapped in (QWEN_VL_2B, QWEN_VL_8B):
             print(
                 "[embed] no official Qwen-VL-Embedding-4B (VL family is 2B / 8B); "
                 f"using {mapped}"
             )
         return mapped
+    if "wemm" in raw.lower():
+        return raw
     if "vl" in raw.lower() and "4b" in raw.lower():
         print(f"[embed] {raw!r} is not a published VL embedder; using {QWEN_VL_2B}")
         return QWEN_VL_2B
     return raw
 
 
+def kind_from_model(name: str | None) -> str | None:
+    """Encoder family implied by a model id, or None when unrecognizable.
+
+    WeMM is checked before Qwen because WeMM is built on a Qwen backbone and its
+    description mentions Qwen even though its repo id does not.
+    """
+    lower = (name or "").strip().lower()
+    if not lower:
+        return None
+    if "wemm" in lower:
+        return "wemm"
+    if "qwen" in lower:
+        return "qwen_vl"
+    if "open_clip" in lower or "vit-b-32" in lower or lower == "clip":
+        return "clip"
+    return None
+
+
+def _dims_for_kind(kind: str, name: str) -> set[int]:
+    """Widths an index written by `kind` may legitimately have."""
+    if kind == "clip":
+        return {512}
+    if kind == "wemm":
+        model = resolve_visual_model(name)
+        return set(_WEMM_MRL_DIMS.get(model, ())) or {_dim_from_name(name)}
+    return {2048, 4096}
+
+
+def normalize_encoder_kind(value: str | None) -> str:
+    raw = (value or "qwen_vl").strip().lower()
+    if raw in ENCODER_KINDS:
+        return raw
+    if raw in ("qwen", "qwenvl", "qwen-vl"):
+        return "qwen_vl"
+    if raw.startswith("wemm"):
+        return "wemm"
+    if raw.startswith(("clip", "open_clip")):
+        return "clip"
+    return "qwen_vl"
+
+
 def encoder_kind(*, meta=None, settings=None) -> str:
-    """Which visual encoder wrote (or will write) this index."""
+    """Which visual encoder wrote (or will write) this index.
+
+    Resolution order matters. Vector width is *not* a reliable discriminator
+    because WeMM-2B and Qwen-VL-2B are both 2048-d, so trusting the width would
+    silently query a WeMM index with the Qwen encoder. But width is still needed
+    to heal old indexes whose `meta.json` records a stale CLIP label after a Qwen
+    rewrite. The compromise: trust the explicit field, then the model name, and
+    only fall back to width when the name disagrees with the stored width.
+    """
     if meta is not None:
-        dim = getattr(getattr(meta, "models", None), "visual_dim", None)
-        name = (getattr(getattr(meta, "models", None), "clip", "") or "").lower()
-        if dim in (2048, 4096):
-            return "qwen_vl"
-        if dim == 512:
-            return "clip"
-        if "qwen" in name:
-            return "qwen_vl"
-        if "open_clip" in name or "vit-b-32" in name:
-            return "clip"
+        card = getattr(meta, "models", None)
+        explicit = normalize_encoder_kind(getattr(card, "visual_encoder", None) or "") \
+            if (getattr(card, "visual_encoder", None) or "").strip() else None
+        if explicit:
+            return explicit
+        name = getattr(card, "clip", "") or ""
+        dim = getattr(card, "visual_dim", None)
+        named = kind_from_model(name)
+        if named and (not dim or int(dim) in _dims_for_kind(named, name)):
+            return named
         if dim:
             return "clip" if int(dim) == 512 else "qwen_vl"
+        if named:
+            return named
     cfg = settings or load_settings()
-    return "clip" if (cfg.visual_encoder or "qwen_vl").strip().lower() == "clip" else "qwen_vl"
+    return normalize_encoder_kind(cfg.visual_encoder)
 
 
 def visual_dim(*, settings=None, meta=None) -> int:
@@ -75,14 +162,31 @@ def visual_dim(*, settings=None, meta=None) -> int:
             return int(stored)
         return _dim_from_name(getattr(meta.models, "clip", "") or "")
     cfg = settings or load_settings()
-    if (cfg.visual_encoder or "qwen_vl").strip().lower() == "clip":
+    kind = normalize_encoder_kind(cfg.visual_encoder)
+    if kind == "clip":
         return 512
-    return _dim_from_name(resolve_visual_model(cfg.visual_model))
+    model = resolve_visual_model(cfg.visual_model)
+    if kind == "wemm":
+        return _wemm_dim(model, cfg.visual_truncate_dim)
+    return _dim_from_name(model)
+
+
+def _wemm_dim(model: str, truncate_dim: int | None) -> int:
+    native = _WEMM_NATIVE_DIM.get(model) or _dim_from_name(model)
+    if not truncate_dim:
+        return native
+    allowed = _WEMM_MRL_DIMS.get(model)
+    if allowed and int(truncate_dim) not in allowed:
+        raise SystemExit(
+            f"VVS_VISUAL_TRUNCATE_DIM={truncate_dim} is not a Matryoshka dimension for "
+            f"{model}. Choose one of {', '.join(str(d) for d in allowed)}."
+        )
+    return int(truncate_dim)
 
 
 def visual_model_label(*, settings=None) -> str:
     cfg = settings or load_settings()
-    if (cfg.visual_encoder or "qwen_vl").strip().lower() == "clip":
+    if normalize_encoder_kind(cfg.visual_encoder) == "clip":
         return CLIP_NAME
     return resolve_visual_model(cfg.visual_model)
 
@@ -94,6 +198,15 @@ def l2_normalize(mat: np.ndarray, eps: float = 1e-12) -> np.ndarray:
 
 def _dim_from_name(name: str) -> int:
     lower = (name or "").lower()
+    if "wemm" in lower:
+        native = _WEMM_NATIVE_DIM.get(_MODEL_ALIASES.get(lower, name))
+        if native:
+            return native
+        if "9b" in lower:
+            return 4096
+        if "4b" in lower:
+            return 2560
+        return 2048
     if "8b" in lower or "4096" in lower:
         return 4096
     if "vit-b-32" in lower or "open_clip" in lower or lower == "clip":
@@ -118,12 +231,22 @@ def _clip_bundle():
     return model, preprocess, tokenizer
 
 
-@lru_cache(maxsize=1)
-def _qwen_vl(model_id: str):
+# maxsize=2 so an A/B run can hold Qwen and WeMM at once instead of reloading
+# a multi-GB model on every alternating call.
+@lru_cache(maxsize=2)
+def _sentence_transformer(model_id: str) -> object:
     from sentence_transformers import SentenceTransformer
 
-    print(f"[embed] loading {model_id} (CPU, Qwen3-VL-Embedding)")
+    print(f"[embed] loading {model_id} (CPU)")
     return SentenceTransformer(model_id, device="cpu", trust_remote_code=True)
+
+
+def _qwen_vl(model_id: str):
+    return _sentence_transformer(model_id)
+
+
+def _wemm(model_id: str):
+    return _sentence_transformer(model_id)
 
 
 @lru_cache(maxsize=1)
@@ -137,10 +260,22 @@ def _bge():
 def _model_id_for(*, meta=None, settings=None) -> str:
     if meta is not None:
         name = getattr(getattr(meta, "models", None), "clip", "") or ""
-        if name and encoder_kind(meta=meta) == "qwen_vl":
+        if name and encoder_kind(meta=meta) in ("qwen_vl", "wemm"):
             return resolve_visual_model(name)
     cfg = settings or load_settings()
     return resolve_visual_model(cfg.visual_model)
+
+
+def _truncate_dim_for(*, meta=None, settings=None) -> int | None:
+    """Matryoshka width to request. A stored index's own width always wins."""
+    if meta is not None:
+        stored = getattr(getattr(meta, "models", None), "visual_dim", None)
+        if stored:
+            model = _model_id_for(meta=meta, settings=settings)
+            native = _WEMM_NATIVE_DIM.get(model)
+            return None if native and int(stored) == native else int(stored)
+    cfg = settings or load_settings()
+    return cfg.visual_truncate_dim or None
 
 
 def warm_models() -> None:
@@ -165,8 +300,11 @@ def embed_clip_images(
     dim = visual_dim(settings=cfg, meta=meta)
     if not paths:
         return np.zeros((0, dim), dtype=np.float32)
-    if encoder_kind(meta=meta, settings=cfg) == "clip":
+    kind = encoder_kind(meta=meta, settings=cfg)
+    if kind == "clip":
         return _embed_clip_images(paths, batch_size=batch_size or 16)
+    if kind == "wemm":
+        return _embed_wemm_images(paths, batch_size=batch_size or 1, meta=meta, settings=cfg)
     return _embed_qwen_images(paths, batch_size=batch_size or 1, meta=meta, settings=cfg)
 
 
@@ -176,8 +314,11 @@ def embed_clip_texts(texts: list[str], *, meta=None, settings=None) -> np.ndarra
     dim = visual_dim(settings=cfg, meta=meta)
     if not texts:
         return np.zeros((0, dim), dtype=np.float32)
-    if encoder_kind(meta=meta, settings=cfg) == "clip":
+    kind = encoder_kind(meta=meta, settings=cfg)
+    if kind == "clip":
         return _embed_clip_texts(texts)
+    if kind == "wemm":
+        return _embed_wemm_texts(texts, meta=meta, settings=cfg)
     return _embed_qwen_texts(texts, meta=meta, settings=cfg)
 
 
@@ -247,6 +388,89 @@ def _embed_qwen_texts(texts: list[str], *, meta=None, settings=None) -> np.ndarr
         convert_to_numpy=True,
         normalize_embeddings=True,
         show_progress_bar=False,
+    )
+    return np.asarray(out, dtype=np.float32)
+
+
+def _embed_wemm_images(
+    paths: list[str] | list[Path],
+    batch_size: int,
+    *,
+    meta=None,
+    settings=None,
+) -> np.ndarray:
+    model_id = _model_id_for(meta=meta, settings=settings)
+    model = _wemm(model_id)
+    dim = visual_dim(settings=settings, meta=meta)
+    truncate = _truncate_dim_for(meta=meta, settings=settings)
+    vecs: list[np.ndarray] = []
+    for i in range(0, len(paths), batch_size):
+        # Image before text: WeMM's chat template expects that order.
+        batch = [
+            {"image": str(p), "text": _WEMM_FRAME_PROMPT} for p in paths[i : i + batch_size]
+        ]
+        out = model.encode_document(
+            batch,
+            batch_size=len(batch),
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+            **({"truncate_dim": truncate} if truncate else {}),
+        )
+        vecs.append(np.asarray(out, dtype=np.float32))
+        print(f"[embed] wemm images {min(i + batch_size, len(paths))}/{len(paths)}")
+    return np.vstack(vecs) if vecs else np.zeros((0, dim), dtype=np.float32)
+
+
+def embed_wemm_videos(
+    paths: list[str] | list[Path],
+    *,
+    batch_size: int = 1,
+    meta=None,
+    settings=None,
+) -> np.ndarray:
+    """Embed whole clips rather than stills. WeMM accepts native video input.
+
+    This is the channel WeMM's MMEB-v2 video score is measured on; the still-frame
+    path above only exercises its image tower. Kept separate from
+    `embed_clip_images` because callers must supply clip paths, not keyframes.
+    """
+    cfg = settings or load_settings()
+    if encoder_kind(meta=meta, settings=cfg) != "wemm":
+        raise SystemExit("embed_wemm_videos requires VVS_VISUAL_ENCODER=wemm")
+    model_id = _model_id_for(meta=meta, settings=cfg)
+    model = _wemm(model_id)
+    dim = visual_dim(settings=cfg, meta=meta)
+    truncate = _truncate_dim_for(meta=meta, settings=cfg)
+    vecs: list[np.ndarray] = []
+    for i in range(0, len(paths), batch_size):
+        batch = [
+            {"video": str(p), "text": _WEMM_VIDEO_PROMPT} for p in paths[i : i + batch_size]
+        ]
+        out = model.encode_document(
+            batch,
+            batch_size=len(batch),
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+            **({"truncate_dim": truncate} if truncate else {}),
+        )
+        vecs.append(np.asarray(out, dtype=np.float32))
+        print(f"[embed] wemm videos {min(i + batch_size, len(paths))}/{len(paths)}")
+    return np.vstack(vecs) if vecs else np.zeros((0, dim), dtype=np.float32)
+
+
+def _embed_wemm_texts(texts: list[str], *, meta=None, settings=None) -> np.ndarray:
+    model_id = _model_id_for(meta=meta, settings=settings)
+    model = _wemm(model_id)
+    truncate = _truncate_dim_for(meta=meta, settings=settings)
+    # encode_query applies WeMM's own query-side instruction, so no prompt here.
+    out = model.encode_query(
+        list(texts),
+        convert_to_numpy=True,
+        normalize_embeddings=True,
+        show_progress_bar=False,
+        **({"truncate_dim": truncate} if truncate else {}),
     )
     return np.asarray(out, dtype=np.float32)
 

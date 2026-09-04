@@ -128,6 +128,39 @@ class FaissStore:
             return 0
         return int(self._index.ntotal)
 
+    def all_payloads(self, modality: str | None = None) -> list[VectorPayload]:
+        """Every payload in insertion order. Used to re-embed a store in place."""
+        self._open_db()
+        assert self._conn is not None
+        sql = (
+            "SELECT vector_id, asset_id, t_s, modality, path, text, frame_index, "
+            "capture_ts, site_id, shot_id, motion_energy, flash_energy FROM payload"
+        )
+        params: tuple[Any, ...] = ()
+        if modality:
+            sql += " WHERE modality = ?"
+            params = (modality,)
+        sql += " ORDER BY vector_id"
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [
+            VectorPayload(
+                vector_id=int(row[0]),
+                asset_id=str(row[1]),
+                t_s=float(row[2]),
+                modality=str(row[3]),
+                path=str(row[4] or ""),
+                text=row[5],
+                frame_index=row[6],
+                capture_ts=row[7],
+                site_id=row[8],
+                shot_id=row[9],
+                motion_energy=float(row[10] or 0.0),
+                flash_energy=float(row[11] or 0.0),
+            )
+            for row in rows
+        ]
+
     def close(self) -> None:
         self._index = None
         if self._conn is not None:

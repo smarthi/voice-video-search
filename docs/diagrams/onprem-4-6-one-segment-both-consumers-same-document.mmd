@@ -1,0 +1,23 @@
+sequenceDiagram
+  participant K as vvs.segments
+  participant E as Embed worker
+  participant C as Caption worker
+  participant V as vllm-embed
+  participant I as vllm-instruct
+  participant O as OpenSearch
+  participant P as Postgres
+
+  K->>E: segment a1b2c3d4e5f6
+  K->>C: segment a1b2c3d4e5f6
+  E->>V: still URI
+  C->>I: still URI
+  I-->>C: a saxophone player in blue light
+  C->>O: _update a1b2c3d4e5f6, retry_on_conflict 5, caption
+  V-->>E: 2048-d vector
+  E->>O: _update a1b2c3d4e5f6, retry_on_conflict 5, visual_vector and ocr
+  O-->>E: 200
+  E->>P: visual_done plus 1
+  E->>K: commit offset
+  O-->>C: 200
+  C->>P: caption_done plus 1
+  C->>K: commit offset

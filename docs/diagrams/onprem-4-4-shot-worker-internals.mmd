@@ -1,0 +1,13 @@
+flowchart LR
+  M["vvs.assets message"] --> D["Open media URI with PyAV"]
+  D --> T["Decode 48x27 proxy"]
+  T --> TN["transnet-api: cut probabilities"]
+  TN --> SEG["Segment = cut boundary + 20 s floor"]
+  D --> MR["Decode mid-res for stills"]
+  MR --> STL["Pick representative frame per segment"]
+  MR --> MO["motion_energy and flash_energy on 64x36"]
+  MO --> STL
+  STL --> PUT["PUT proxy JPEG to object store"]
+  SEG --> PUB["Publish one vvs.segments message per segment"]
+  PUT --> PUB
+  PUB --> WM["Postgres: segment_count = N"]

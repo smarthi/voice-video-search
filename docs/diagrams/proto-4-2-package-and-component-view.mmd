@@ -1,0 +1,18 @@
+flowchart LR
+  CLI["cli.py: index, query, app, warm, list"] --> CFG["config.py: Settings, VVS_* env"]
+  CLI --> IDX["retrieve/index.py: build_index, load_index"]
+  IDX --> INGP["ingest/: yt-dlp or local copy"]
+  IDX --> FRM["media/frames.py: 2 fps, dHash, floor"]
+  IDX --> SHT["media/shots.py: TransNetV2"]
+  IDX --> MOT["media/motion.py: motion and flash energy"]
+  IDX --> TRS["media/transcribe.py: faster-whisper"]
+  IDX --> OCRM["media/ocr.py: RapidOCR"]
+  IDX --> SCN["media/scenes.py + caption.py"]
+  IDX --> EMB["retrieve/embed.py: Qwen-VL and BGE"]
+  IDX --> STO["retrieve/store.py: VectorStore"]
+  STO --> FS["FaissStore: mmap faiss + sqlite"]
+  STO --> QS["QdrantStore: stub, superseded by OpenSearch"]
+  SRCH["retrieve/search.py: per-video RRF, archive merge"] --> STO
+  SRCH --> EMB
+  UI["ui/: Gradio app, Sightline theme, timeline"] --> SRCH
+  UI --> CLP["media/clips.py: H.264 cut"]
