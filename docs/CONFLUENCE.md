@@ -221,6 +221,18 @@ a single OpenMP runtime in the process, which requires coordinated wheel builds
 outside our control, and is worth revisiting for the on-prem deployment where the
 container image is ours to define.
 
+**Surviving the abort.** Because an OpenMP abort can land mid-write, `meta.json`
+is written atomically: temp file, `fsync`, then `os.replace`, with the previous
+copy rotated to `meta.json.bak` and readers falling back to it when the primary
+will not parse. This is not incidental hardening. `meta.json` holds the
+transcript, the scene captions and the OCR text, none of which are recoverable
+from the FAISS stores, so losing it means re-running the captioner across the
+whole asset. And a truncated file is worse than a missing one, because
+`index_exists()` only tests for presence: a half-written file left the video
+listed but unparseable, so it vanished from the library with no explanation.
+Indexes damaged before this change have no backup to recover from and must be
+re-analyzed.
+
 **FFmpeg / AVFoundation — noisy, not fatal.** PyAV and OpenCV each bundle
 `libavdevice`, which on macOS registers the Objective-C classes
 `AVFFrameReceiver` and `AVFAudioReceiver`. Two copies in one process register the

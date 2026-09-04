@@ -115,6 +115,25 @@ runs OpenMP-parallel, single-threaded writes do not. `vvs/__init__.py` sets
 documented escape hatch and a mitigation, not a cure — the cure is a single
 OpenMP runtime, which needs wheel builds we do not control.
 
+*Surviving a crash.* An abort can kill the process mid-write, and `meta.json`
+carries the transcript, scene captions and OCR text — none of which can be
+rebuilt from the FAISS stores, so losing it means re-captioning the whole video.
+It is written atomically (temp file, `fsync`, `os.replace`) with the previous copy
+rotated to `meta.json.bak`, and readers fall back to that backup when the primary
+will not parse. This matters because a truncated `meta.json` is worse than a
+missing one: `index_exists()` only tests for presence, so before this change a
+half-written file left the video listed but unloadable, and it simply disappeared
+from the library with no explanation. To find already-damaged indexes from an
+earlier crash:
+
+```bash
+for m in data/*/meta.json; do python -c "import json,sys;json.load(open(sys.argv[1]))" "$m" \
+  2>/dev/null || echo "CORRUPT: $m"; done
+```
+
+Anything listed there predates the atomic write and needs **Re-analyze**, since
+there is no backup to recover from yet.
+
 *FFmpeg / AVFoundation (noisy, not fatal).* PyAV and OpenCV each bundle
 `libavdevice`, which on macOS registers the ObjC classes `AVFFrameReceiver` and
 `AVFAudioReceiver`. Two copies means two registrations, and the runtime says so at
@@ -331,6 +350,7 @@ Outputs in `data/<video_id>/`:
 | `visual.faiss` / `visual.sqlite` | Qwen-VL ANN + payload (`asset_id`, `shot_id`, path, `t_s`, `motion_energy`, `flash_energy`) |
 | `text.faiss` / `text.sqlite` | BGE ANN + payload (OCR / transcript / scene) |
 | `meta.json` | Title, duration, frames, shots, transcript, OCR, scene cards, channels |
+| `meta.json.bak` | Previous `meta.json`, rotated on every write. Read only when the primary will not parse |
 | `timings.json` | Stage seconds |
 
 `index.npz` is migrate-only leftover. Query does not load it.

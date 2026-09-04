@@ -31,10 +31,12 @@ from vvs.paths import (
     DATA_ROOT,
     index_path,
     meta_path,
+    read_json_text,
     timings_path,
     video_dir,
     video_path,
     visual_faiss_path,
+    write_json_atomic,
 )
 from vvs.retrieve.embed import (
     embed_bge_texts,
@@ -247,9 +249,9 @@ def build_index(
         ),
         vector_backend=settings.vector_backend,
     )
-    meta_path(vid).write_text(meta.model_dump_json(indent=2), encoding="utf-8")
+    write_json_atomic(meta_path(vid), meta.model_dump_json(indent=2))
     timings.total_s = perf_counter() - started
-    timings_path(vid).write_text(timings.model_dump_json(indent=2), encoding="utf-8")
+    write_json_atomic(timings_path(vid), timings.model_dump_json(indent=2))
     print(f"[index] wrote FAISS stores and {meta_path(vid)}")
     for name, value in timings.model_dump().items():
         print(f"[timing] {name}: {value:.2f}s")
@@ -293,7 +295,7 @@ def load_index(video_id: str) -> dict[str, Any]:
     """Open mmap'd stores + metadata. Does not load embedding matrices into NumPy."""
     if not visual_store_exists(video_id) and index_path(video_id).exists():
         migrate_npz_to_faiss(video_id)
-    meta = IndexMeta.model_validate_json(meta_path(video_id).read_text(encoding="utf-8"))
+    meta = IndexMeta.model_validate_json(read_json_text(meta_path(video_id)))
     settings = load_settings()
     visual = open_store(
         video_id, "visual", dim=visual_dim(meta=meta), settings=settings, create=False
@@ -311,7 +313,7 @@ def load_index(video_id: str) -> dict[str, Any]:
             meta.models.clip = visual_model_label(settings=settings)
         if not meta.models.visual_encoder:
             meta.models.visual_encoder = encoder_kind(meta=meta)
-        meta_path(video_id).write_text(meta.model_dump_json(indent=2), encoding="utf-8")
+        write_json_atomic(meta_path(video_id), meta.model_dump_json(indent=2))
         print(f"[index] healed {video_id} meta visual_dim={visual.dim}")
     text = None
     text_path = video_dir_text_exists(video_id)
@@ -361,7 +363,7 @@ def migrate_npz_to_faiss(video_id: str) -> None:
     if meta.transcript:
         meta.channels.asr = True
         meta.channels.transcript = True
-    meta_path(video_id).write_text(meta.model_dump_json(indent=2), encoding="utf-8")
+    write_json_atomic(meta_path(video_id), meta.model_dump_json(indent=2))
     print(f"[index] migrated {video_id}; vectors now live in FAISS (npz kept as backup)")
 
 

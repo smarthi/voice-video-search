@@ -7,7 +7,7 @@ from pathlib import Path
 from vvs.ingest.local import ingest_local, local_slug
 from vvs.ingest.youtube import download_youtube, parse_youtube_id
 from vvs.models import IngestInfo
-from vvs.paths import video_dir, video_path
+from vvs.paths import video_dir, video_path, write_json_atomic
 
 
 def extract_video_id(source: str) -> str:
@@ -33,12 +33,12 @@ def ingest(source: str, dest_id: str | None = None) -> IngestInfo:
     local = Path(source).expanduser()
     if local.exists() and local.is_file():
         info = ingest_local(local, dest, video_id)
-        cached.write_text(info.model_dump_json(indent=2), encoding="utf-8")
+        write_json_atomic(cached, info.model_dump_json(indent=2))
         return info
 
     if dest.exists() and dest.stat().st_size > 0 and cached.exists():
         return IngestInfo.model_validate_json(cached.read_text(encoding="utf-8"))
 
     info = download_youtube(source, dest).model_copy(update={"video_id": video_id, "path": str(dest)})
-    cached.write_text(info.model_dump_json(indent=2), encoding="utf-8")
+    write_json_atomic(cached, info.model_dump_json(indent=2))
     return info

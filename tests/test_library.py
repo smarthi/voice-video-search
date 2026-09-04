@@ -202,6 +202,73 @@ def test_delete_index_is_a_noop_for_unknown_ids() -> None:
     assert delete_index("definitely-not-indexed-9f3a") is False
 
 
+def test_atomic_write_leaves_no_partial_file_and_keeps_a_backup() -> None:
+    import json
+    import tempfile
+    from pathlib import Path
+
+    from vvs.paths import read_json_text, write_json_atomic
+
+    with tempfile.TemporaryDirectory() as tmp:
+        target = Path(tmp) / "meta.json"
+        write_json_atomic(target, json.dumps({"v": 1}))
+        assert json.loads(target.read_text())["v"] == 1
+        assert not (Path(tmp) / "meta.json.tmp").exists()
+
+        write_json_atomic(target, json.dumps({"v": 2}))
+        assert json.loads(target.read_text())["v"] == 2
+        # The previous copy is rotated, not overwritten: meta.json holds the
+        # transcript and captions, which cannot be rebuilt from the FAISS store.
+        assert json.loads(target.with_suffix(".json.bak").read_text())["v"] == 1
+        assert read_json_text(target) == target.read_text()
+
+
+def test_truncated_meta_is_recovered_from_the_backup() -> None:
+    """The exact macOS failure: an abort mid-write leaves invalid JSON behind."""
+    import json
+    import tempfile
+    from pathlib import Path
+
+    from vvs.paths import read_json_text, write_json_atomic
+
+    with tempfile.TemporaryDirectory() as tmp:
+        target = Path(tmp) / "meta.json"
+        write_json_atomic(target, json.dumps({"good": True}))
+        write_json_atomic(target, json.dumps({"good": True, "n": 2}))
+        target.write_text('{"good": tr')  # truncated, as an abort would leave it
+
+        recovered = json.loads(read_json_text(target))
+        assert recovered["good"] is True
+
+        target.unlink()  # a missing primary must also fall back
+        assert json.loads(read_json_text(target))["good"] is True
+
+
+def test_read_json_text_raises_when_nothing_is_usable() -> None:
+    import tempfile
+    from pathlib import Path
+
+    from vvs.paths import read_json_text
+
+    with tempfile.TemporaryDirectory() as tmp:
+        target = Path(tmp) / "meta.json"
+        try:
+            read_json_text(target)
+        except FileNotFoundError:
+            pass
+        else:
+            raise AssertionError("expected FileNotFoundError")
+
+        target.write_text("{not json")
+        target.with_suffix(".json.bak").write_text("also not json")
+        try:
+            read_json_text(target)
+        except FileNotFoundError:
+            pass
+        else:
+            raise AssertionError("expected FileNotFoundError when both are corrupt")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

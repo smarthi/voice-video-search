@@ -14,7 +14,7 @@ from fractions import Fraction
 from pathlib import Path
 from urllib.parse import quote
 
-from vvs.paths import meta_path, preview_path, video_path
+from vvs.paths import meta_path, preview_path, read_json_text, video_path
 from vvs.retrieve.index import list_indexed
 from vvs.retrieve.search import fmt_time
 
@@ -66,12 +66,15 @@ def entries(video_ids: list[str] | None = None) -> list[LibraryEntry]:
 
 def _entry(video_id: str) -> LibraryEntry | None:
     path = meta_path(video_id)
-    if not path.exists():
+    if not path.exists() and not path.with_name(path.name + ".bak").exists():
         return None
     try:
-        meta = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        print(f"[library] unreadable meta for {video_id}: {exc}")
+        meta = json.loads(read_json_text(path))
+    except (OSError, ValueError) as exc:
+        # Loud rather than silent: a crash mid-write can truncate meta.json, and
+        # index_exists() only checks presence, so the video would otherwise just
+        # disappear from the library with no explanation. Re-analyze rebuilds it.
+        print(f"[library] {video_id} has no usable meta ({exc}); Re-analyze to rebuild it")
         return None
 
     frames = meta.get("frames") or []

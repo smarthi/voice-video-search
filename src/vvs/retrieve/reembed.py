@@ -19,7 +19,7 @@ import numpy as np
 
 from vvs.config import Settings, load_settings
 from vvs.models import IndexMeta
-from vvs.paths import meta_path, video_dir
+from vvs.paths import meta_path, video_dir, write_json_atomic
 from vvs.retrieve.embed import (
     embed_clip_images,
     encoder_kind,
@@ -186,4 +186,4 @@ def _write_meta(source_id: str, dest_id: str, cfg: Settings, *, dim: int) -> Non
     if video.exists():
         updates["video_path"] = str(video.resolve())
     clone = meta.model_copy(update=updates)
-    meta_path(dest_id).write_text(clone.model_dump_json(indent=2), encoding="utf-8")
+    write_json_atomic(meta_path(dest_id), clone.model_dump_json(indent=2))
