@@ -21,11 +21,18 @@ _IVF_MIN_N = 256
 def faiss_thread_default() -> int:
     """Threads to give FAISS. 1 on macOS, 0 ("leave alone") elsewhere.
 
-    faiss-cpu and torch each bundle their own LLVM OpenMP runtime. With both
-    loaded, a FAISS OpenMP parallel region entered from a *non-main* thread
-    segfaults inside swigfaiss search, and every Gradio request is served on an
-    anyio worker thread, so search crashed while CLI use looked fine. Running
-    FAISS with one thread never opens that parallel region.
+    faiss-cpu and torch each bundle their own LLVM OpenMP runtime. Measured on
+    macOS/arm64: `__kmpc_fork_call` still segfaults inside `swigfaiss.search`
+    even with this pinned to 1 -- the fork/join barrier machinery runs
+    regardless of team size, so this alone does not prevent the crash. The
+    actual condition is thread identity, not thread count: the *first* thread
+    to ever call into faiss's OpenMP runtime is fine, and a *second*, different
+    thread calling in later reliably segfaults, warm or not. Every Gradio
+    request is served on a different worker thread, so search crashed there
+    while single-threaded CLI use looked fine. The real fix is
+    `vvs/compute.py`, which funnels every torch/faiss call in the UI through
+    one dedicated thread so only one thread ever touches this runtime. This
+    thread cap is kept anyway as a cheap, harmless second line of defense.
 
     This costs nothing here: these are per-video HNSW indexes of a few thousand
     vectors, where the search itself is microseconds and query embedding

@@ -9,6 +9,7 @@ from typing import Any
 import gradio as gr
 from PIL import Image, ImageDraw
 
+from vvs import compute
 from vvs.config import load_settings
 from vvs.ingest import extract_video_id
 from vvs.media.clips import attach_corpus_clips
@@ -85,7 +86,12 @@ def launch(
 
     if warm:
         print("[app] warming models…")
-        warm_models()
+        # Warm on the dedicated compute thread, not this (main) thread: every
+        # request lands on a different Gradio worker thread, and torch/faiss
+        # segfault the moment a *second* distinct thread touches them (see
+        # vvs/compute.py). Warming here on main would just be the first of
+        # those crashes waiting to happen.
+        compute.run(warm_models)
         print("[app] models ready")
 
     archive_n = len(list_indexed())
@@ -103,6 +109,12 @@ def launch(
     )
 
     def run_query(query: str, vid: str | None, scope_id: str | None = None) -> tuple:
+        # Every request is served on its own Gradio worker thread; funnel the
+        # actual torch/faiss work onto the one dedicated compute thread (see
+        # vvs/compute.py) so it never runs on two different threads.
+        return compute.run(_run_query, query, vid, scope_id)
+
+    def _run_query(query: str, vid: str | None, scope_id: str | None) -> tuple:
         ids = _ensure_corpus()
         if vid and vid not in ids and index_exists(vid):
             _BUNDLES[vid] = load_index(vid)
@@ -151,16 +163,19 @@ def launch(
             return _idle_outputs("Analyze a video first.")
         query = (query or "").strip()
         if not query:
-            meta = _bundle(vid)["meta"] if vid else None
+            meta = compute.run(_bundle, vid)["meta"] if vid else None
             return _idle_outputs("Type or speak a query.", meta)
         return run_query(query, vid, scope_id)
 
     def from_audio(audio_path: str | None, typed: str, vid: str | None, scope_id: str | None):
         if not list_indexed() and not vid:
             return "", *_idle_outputs("Analyze a video first.")
-        meta = _bundle(vid)["meta"] if vid else None
+        meta = compute.run(_bundle, vid)["meta"] if vid else None
         if audio_path:
-            spoken = transcribe_audio_file(Path(audio_path))
+            # Whisper (faster-whisper/ctranslate2) is another native, threaded
+            # backend; keep it on the same dedicated compute thread as
+            # everything else (see vvs/compute.py).
+            spoken = compute.run(transcribe_audio_file, Path(audio_path))
             if spoken:
                 return spoken, *run_query(spoken, vid, scope_id)
         if typed and typed.strip():
@@ -176,7 +191,8 @@ def launch(
         shot_on: bool,
         progress: gr.Progress = gr.Progress(),
     ):
-        return _analyze(
+        return compute.run(
+            _analyze,
             url_or_path,
             upload,
             current_vid,
@@ -196,7 +212,8 @@ def launch(
         shot_on: bool,
         progress: gr.Progress = gr.Progress(),
     ):
-        return _analyze(
+        return compute.run(
+            _analyze,
             url_or_path,
             upload,
             current_vid,
@@ -214,7 +231,7 @@ def launch(
         def on_progress(done: int, total: int, vid: str) -> None:
             progress(done / max(1, total), desc=f"Preview {done}/{total} · {vid}")
 
-        made = ensure_previews(ids, on_progress=on_progress)
+        made = compute.run(ensure_previews, ids, on_progress=on_progress)
         failed = [vid for vid, path in made.items() if path is None]
         if failed:
             print(f"[app] no preview for: {', '.join(failed)}")

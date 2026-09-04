@@ -112,21 +112,35 @@ OpenMP runtime — on macOS arm64, `faiss/.dylibs/libomp.dylib` and
 1. Whichever runtime initializes second makes OpenMP abort the process.
    `vvs/__init__.py` sets `KMP_DUPLICATE_LIB_OK=TRUE` before torch or faiss can
    be imported, which is the documented escape hatch for that.
-2. Past that abort, a FAISS OpenMP parallel region entered from a **non-main
-   thread** segfaults — precisely the crash `KMP_DUPLICATE_LIB_OK` warns it can
-   cause. Every Gradio request is served on an anyio worker thread, so search
-   crashed in the UI while the same query from the CLI was fine. `faulthandler`
-   pinned it to `swigfaiss.search` called from `ui/app.py`.
+2. Past that abort, `swigfaiss.search`'s OpenMP parallel region
+   (`__kmpc_fork_call` → `__kmp_join_barrier` → `__kmp_suspend_initialize_thread`)
+   segfaults the moment it is entered from a **second distinct OS thread**, warm
+   or not — confirmed by direct repro, not just inference from crash logs.
+   Pinning FAISS to one thread (`faiss_thread_default()` in
+   `retrieve/faiss_store.py`, `VVS_FAISS_THREADS` to override) does **not** avoid
+   this: `__kmpc_fork_call` still runs the full fork/join barrier machinery
+   regardless of team size. Priming the runtime on the main thread first doesn't
+   help either — the crash isn't main-vs-background, it's "first thread ever to
+   call in" vs "any other thread calling in later." Every Gradio request is
+   served on a different worker thread, so search crashed in the UI while the
+   same query from the CLI (a single process, one thread, done) was fine.
+   `faulthandler` pinned it to `swigfaiss.search` called from `ui/app.py`.
 
-The fix for (2) is to keep FAISS single-threaded on macOS, so it never opens that
-parallel region: `faiss_thread_default()` in `retrieve/faiss_store.py` returns 1
-on Darwin and 0 ("leave FAISS alone") elsewhere, and every faiss import routes
-through one pinned loader so no call site can skip it. Override with
-`VVS_FAISS_THREADS`. This costs nothing measurable — these are per-video HNSW
-indexes of a few thousand vectors where the ANN search is microseconds and query
-embedding dominates by orders of magnitude; pinning returns byte-identical
-scores. Linux keeps FAISS's default, since its manylinux wheels do not bring a
-second OpenMP runtime.
+The real fix for (2) is `vvs/compute.py`: a single dedicated background thread
+that every torch/faiss/whisper call in the UI is funneled through via
+`compute.run(fn, *args, **kwargs)`, including the model warm-up itself (so the
+thread that loads the models is the same thread that ever touches faiss —
+warming on the main thread, as `launch()` used to, doesn't help, since the main
+thread is never the one serving requests). This guarantees exactly one thread
+touches the OpenMP runtime for the life of the process, regardless of which
+Gradio worker thread a request lands on. Verified against the live server with
+mixed sequential and concurrent `/from_text` requests. The one-thread FAISS pin
+is kept anyway as a cheap, harmless second line of defense; it costs nothing
+measurable on these per-video HNSW indexes of a few thousand vectors, where the
+ANN search is microseconds and query embedding dominates by orders of
+magnitude. Linux keeps FAISS's default thread count, since its manylinux wheels
+do not bring a second OpenMP runtime and the CLI never introduces a second
+thread either way.
 
 *Diagnosing a silent death.* A native crash in torch, faiss, onnxruntime or the
 bundled FFmpeg kills the process with a signal, so Python raises nothing and the
