@@ -105,15 +105,28 @@ note, not the cause. Set `VVS_DEVICE=cpu` to confirm the GPU is implicated, then
 **Duplicate native libraries.** Two independent duplications bite this stack, and
 they are worth separating because only one of them is fatal.
 
-*OpenMP (fatal, mitigated).* `faiss-cpu` and `torch` each bundle their own LLVM
+*OpenMP (fatal, fixed).* `faiss-cpu` and `torch` each bundle their own LLVM
 OpenMP runtime — on macOS arm64, `faiss/.dylibs/libomp.dylib` and
-`torch/lib/libomp.dylib`. Whichever initializes second makes OpenMP abort the
-process, printing `OMP: Error #15` if you are lucky and just dying if you are
-not. This is why FAISS **search** could crash while indexing survived: search
-runs OpenMP-parallel, single-threaded writes do not. `vvs/__init__.py` sets
-`KMP_DUPLICATE_LIB_OK=TRUE` before torch or faiss is imported. That is the
-documented escape hatch and a mitigation, not a cure — the cure is a single
-OpenMP runtime, which needs wheel builds we do not control.
+`torch/lib/libomp.dylib`. Two consequences, and both had to be handled:
+
+1. Whichever runtime initializes second makes OpenMP abort the process.
+   `vvs/__init__.py` sets `KMP_DUPLICATE_LIB_OK=TRUE` before torch or faiss can
+   be imported, which is the documented escape hatch for that.
+2. Past that abort, a FAISS OpenMP parallel region entered from a **non-main
+   thread** segfaults — precisely the crash `KMP_DUPLICATE_LIB_OK` warns it can
+   cause. Every Gradio request is served on an anyio worker thread, so search
+   crashed in the UI while the same query from the CLI was fine. `faulthandler`
+   pinned it to `swigfaiss.search` called from `ui/app.py`.
+
+The fix for (2) is to keep FAISS single-threaded on macOS, so it never opens that
+parallel region: `faiss_thread_default()` in `retrieve/faiss_store.py` returns 1
+on Darwin and 0 ("leave FAISS alone") elsewhere, and every faiss import routes
+through one pinned loader so no call site can skip it. Override with
+`VVS_FAISS_THREADS`. This costs nothing measurable — these are per-video HNSW
+indexes of a few thousand vectors where the ANN search is microseconds and query
+embedding dominates by orders of magnitude; pinning returns byte-identical
+scores. Linux keeps FAISS's default, since its manylinux wheels do not bring a
+second OpenMP runtime.
 
 *Diagnosing a silent death.* A native crash in torch, faiss, onnxruntime or the
 bundled FFmpeg kills the process with a signal, so Python raises nothing and the
@@ -414,6 +427,8 @@ Commands: `uv run vvs index|query|app|warm|list`.
 | `VVS_DEVICE` | `mps`, `cuda`, or `cpu`. Default auto-detects (mps → cuda → cpu) |
 | `VVS_VISUAL_DTYPE` | `float16`, `bfloat16`, `float32`. Default fp16 on GPU, fp32 on CPU |
 | `VVS_VISUAL_BATCH` | Frames per forward pass. Default 8 on GPU, 1 on CPU |
+| `VVS_FAISS_THREADS` | FAISS OpenMP threads. Default 1 on macOS (avoids the libomp segfault), 0 = FAISS default elsewhere |
+| `VVS_FAULTHANDLER` | `0` disables the C-level traceback on fatal signals |
 
 Search weights live in `retrieve/search.py` (not env): per-video RRF (`TEXT_WEIGHT` 1.6, `OCR_WEIGHT` 0.6, `SCENE_WEIGHT` 1.0) and archive merge (`SCENE_ANN_WEIGHT` 1.15, `TEXT_ANN_WEIGHT` 1.4, `OCR_ANN_WEIGHT` 0.55, `LEXICAL_BLEND` 0.2, `MOTION_BLEND` 0.45). Motion/flash keep thresholds are in `media/motion.py` (`FLASH_KEEP` 0.22, `MOTION_KEEP` 0.18).
 

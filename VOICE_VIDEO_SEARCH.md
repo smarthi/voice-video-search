@@ -208,18 +208,37 @@ forward passes where an embedding costs one.
 Two independent library duplications affect this stack. They are worth keeping
 apart, because one is fatal and the other only looks alarming.
 
-**OpenMP — fatal, mitigated.** `faiss-cpu` and `torch` each bundle their own copy
-of the LLVM OpenMP runtime; on macOS arm64 these are `faiss/.dylibs/libomp.dylib`
-and `torch/lib/libomp.dylib`. Whichever initializes second causes OpenMP to abort
-the process. The failure is order-dependent and therefore looks capricious: FAISS
-**search** is an OpenMP-parallel path and crashed, while the largely
-single-threaded index write completed, so the same build appeared to index a
-video successfully and then die on the first query. `vvs/__init__.py` sets
-`KMP_DUPLICATE_LIB_OK=TRUE` before torch or faiss can be imported, which is the
-upstream-documented escape hatch. It is explicitly a mitigation. The real fix is
-a single OpenMP runtime in the process, which requires coordinated wheel builds
-outside our control, and is worth revisiting for the on-prem deployment where the
-container image is ours to define.
+**OpenMP — fatal, fixed.** `faiss-cpu` and `torch` each bundle their own copy of
+the LLVM OpenMP runtime; on macOS arm64 these are `faiss/.dylibs/libomp.dylib`
+and `torch/lib/libomp.dylib`. This produces two distinct failures.
+
+First, whichever runtime initializes second causes OpenMP to abort the process.
+`vvs/__init__.py` sets `KMP_DUPLICATE_LIB_OK=TRUE` before torch or faiss can be
+imported, which is the upstream-documented escape hatch.
+
+Second, and this is the one that mattered, allowing the duplicate exposes exactly
+the crash that flag warns about: a FAISS OpenMP parallel region entered from a
+**non-main thread** segfaults. Every Gradio request is served on an anyio worker
+thread, so search died in the UI while the identical query from the CLI
+succeeded — which is why the failure looked capricious and resisted diagnosis
+from symptoms. What settled it was `faulthandler`, which converted the silent
+signal death into a C traceback naming `swigfaiss.search` beneath
+`ui/app.py:from_text`. Before that, the only evidence was the resource tracker's
+`leaked semaphore objects` warning, which is emitted merely because the process
+was killed and names neither step nor library.
+
+The fix is to keep FAISS single-threaded on macOS so the parallel region is never
+opened. `faiss_thread_default()` in `retrieve/faiss_store.py` returns 1 on Darwin
+and 0 ("leave FAISS alone") elsewhere, `VVS_FAISS_THREADS` overrides it, and every
+faiss import is funnelled through a single pinned loader so that no call site can
+bypass the limit — a stray `import faiss` would silently reintroduce the crash, so
+a test asserts the loader is the only importer. The cost is nil: these are
+per-video HNSW indexes of a few thousand vectors, where ANN search is microseconds
+against a query embedding measured in seconds, and pinning returns byte-identical
+scores. Linux keeps FAISS's default because its manylinux wheels do not introduce
+a second OpenMP runtime. For the on-prem build, where the container image is ours
+to define, the cleaner answer is to link one OpenMP runtime process-wide and drop
+both workarounds.
 
 **Surviving the abort.** Because an OpenMP abort can land mid-write, `meta.json`
 is written atomically: temp file, `fsync`, then `os.replace`, with the previous

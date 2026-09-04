@@ -54,9 +54,11 @@ def main() -> int:
     ok(t)
 
     t = step("import faiss (second OpenMP runtime loads here)")
-    import faiss
+    from vvs.retrieve.faiss_store import _faiss, faiss_thread_default
 
+    faiss = _faiss()
     print(f"[diag]     faiss {faiss.__version__}", flush=True)
+    print(f"[diag]     faiss threads pinned to {faiss_thread_default()} (0 = faiss default)", flush=True)
     ok(t)
 
     t = step("resolve device")

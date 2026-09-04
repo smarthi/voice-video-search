@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import sys
 import threading
+from functools import lru_cache
 from typing import Any
 
 import numpy as np
@@ -11,9 +14,51 @@ import numpy as np
 from vvs.paths import video_dir
 from vvs.retrieve.store import StoreHit, VectorPayload
 
-
 # IVF-PQ needs ~39 training vectors per list. Below this, use HNSW / flat.
 _IVF_MIN_N = 256
+
+
+def faiss_thread_default() -> int:
+    """Threads to give FAISS. 1 on macOS, 0 ("leave alone") elsewhere.
+
+    faiss-cpu and torch each bundle their own LLVM OpenMP runtime. With both
+    loaded, a FAISS OpenMP parallel region entered from a *non-main* thread
+    segfaults inside swigfaiss search, and every Gradio request is served on an
+    anyio worker thread, so search crashed while CLI use looked fine. Running
+    FAISS with one thread never opens that parallel region.
+
+    This costs nothing here: these are per-video HNSW indexes of a few thousand
+    vectors, where the search itself is microseconds and query embedding
+    dominates by orders of magnitude. Linux keeps FAISS's own default, since its
+    manylinux wheels do not bring a second OpenMP runtime.
+    """
+    override = (os.environ.get("VVS_FAISS_THREADS") or "").strip()
+    if override.isdigit():
+        return int(override)
+    return 1 if sys.platform == "darwin" else 0
+
+
+def _apply_faiss_threads(faiss_module) -> None:
+    threads = faiss_thread_default()
+    if threads <= 0:
+        return
+    try:
+        faiss_module.omp_set_num_threads(threads)
+    except Exception as exc:  # pragma: no cover - depends on the faiss build
+        print(f"[faiss] could not set thread count ({exc})")
+
+
+@lru_cache(maxsize=1)
+def _faiss():
+    """Import faiss once, pinning its thread count before any index is touched.
+
+    Every call site goes through here so the limit cannot be missed by a code
+    path that imports faiss directly.
+    """
+    import faiss
+
+    _apply_faiss_threads(faiss)
+    return faiss
 
 
 class FaissStore:
@@ -45,7 +90,7 @@ class FaissStore:
             self.index_path.unlink()
 
     def open(self, dim: int) -> None:
-        import faiss
+        faiss = _faiss()
 
         self._open_db()
         stored = self._kv("dim")
@@ -66,7 +111,7 @@ class FaissStore:
         self._index = faiss.read_index(str(self.index_path), faiss.IO_FLAG_MMAP)
 
     def add(self, vectors: np.ndarray, payloads: list[VectorPayload]) -> None:
-        import faiss
+        faiss = _faiss()
 
         if vectors.ndim != 2:
             raise ValueError("vectors must be (n, dim)")
@@ -168,7 +213,7 @@ class FaissStore:
             self._conn = None
 
     def _build_base(self, train: np.ndarray):
-        import faiss
+        faiss = _faiss()
 
         n, dim = train.shape
         want_ivf = self.index_type == "ivf_pq" and n >= _IVF_MIN_N
@@ -187,7 +232,7 @@ class FaissStore:
         return index
 
     def _try_ivf_pq(self, train: np.ndarray):
-        import faiss
+        faiss = _faiss()
 
         n, dim = train.shape
         nlist = int(max(1, min(n // 39, 4 * int(np.sqrt(n)))))
@@ -215,7 +260,7 @@ class FaissStore:
         return getattr(index, "index", index)
 
     def _persist_index(self) -> None:
-        import faiss
+        faiss = _faiss()
 
         if self._index is None:
             return
