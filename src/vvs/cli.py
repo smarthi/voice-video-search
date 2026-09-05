@@ -8,6 +8,7 @@ from pathlib import Path
 
 from vvs.config import load_settings, require_source
 from vvs.media.clips import attach_clips, attach_corpus_clips
+from vvs.retrieve.bulk import bulk_index, parse_sources
 from vvs.retrieve.embed import warm_models
 from vvs.retrieve.index import (
     build_index,
@@ -27,6 +28,16 @@ def main(argv: list[str] | None = None) -> None:
 
     p_index = sub.add_parser("index", help="Download/copy a video and build the retrieval index")
     _add_source_flags(p_index)
+    p_index.add_argument(
+        "--sources-file",
+        default=None,
+        help=(
+            "Bulk mode: index every video listed in this file, one YouTube URL or "
+            "local path per line (blank lines and '#' comments are skipped). "
+            "Ignores --source / --video-id; each video id is derived from its own "
+            "line. Already-indexed videos are skipped unless --rebuild."
+        ),
+    )
     p_index.add_argument("--no-ocr", action="store_true", help="Skip RapidOCR")
     p_index.add_argument(
         "--scene-caption",
@@ -79,6 +90,9 @@ def main(argv: list[str] | None = None) -> None:
 
     args = parser.parse_args(argv)
     if args.cmd == "index":
+        if args.sources_file:
+            _bulk_index_cmd(args)
+            return
         settings = load_settings(source=args.source, video_id=args.video_id)
         source = require_source(settings)
         result = build_index(
@@ -156,6 +170,39 @@ def main(argv: list[str] | None = None) -> None:
         warm_models()
         print("models warmed")
         return
+
+
+def _bulk_index_cmd(args: argparse.Namespace) -> None:
+    path = Path(args.sources_file).expanduser()
+    try:
+        sources = parse_sources(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise SystemExit(f"Could not read {path}: {exc}") from exc
+    if not sources:
+        raise SystemExit(f"No sources found in {path}")
+
+    def on_item_start(i: int, total: int, source: str) -> None:
+        print(f"[bulk] ({i}/{total}) {source}")
+
+    result = bulk_index(
+        sources,
+        enable_ocr=not args.no_ocr,
+        scene_caption=args.scene_caption,
+        shot_detect=args.shot_detect,
+        rebuild=args.rebuild,
+        on_item_start=on_item_start,
+    )
+    for item in result.items:
+        label = item.video_id or "?"
+        if item.status == "indexed":
+            print(f"[bulk]   indexed {label}")
+        elif item.status == "skipped":
+            print(f"[bulk]   skipped {label} ({item.detail})")
+        else:
+            print(f"[bulk]   FAILED  {item.source}: {item.detail}")
+    print(f"[bulk] {result.summary()}")
+    if result.failed:
+        raise SystemExit(1)
 
 
 def _add_source_flags(

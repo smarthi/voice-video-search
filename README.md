@@ -265,7 +265,7 @@ Open the printed `http://127.0.0.1:7860` URL from Windows. Then:
 
 1. Paste a YouTube URL or local path, or upload `.mp4` / `.webm` / `.mkv` / `.mov` / `.avi` / `.m4v`.
 2. Optional analyze options (independent — check **both** to run in one pass): **Group shots with TransNetV2**, then **Describe scenes** (Qwen3-VL-2B-Instruct captions those shot-grouped scenes).
-3. Click **Analyze video**. Repeat for a second title if you want archive hits from more than one file.
+3. Click **Analyze video**. Repeat for a second title if you want archive hits from more than one file — or use **01b · Bulk analyze** to paste/upload several at once (see below).
 4. Type a question → **Search**. That query searches **every** indexed video. Clips are labeled by title. Mic is optional and only useful when a file has speech.
 
 #### 00 · Library
@@ -322,6 +322,25 @@ uv run vvs index --source /path/to/mute.mp4
 ```
 
 Flags match the UI checkboxes: `--shot-detect` / `--no-shot-detect`, `--scene-caption` / `--no-scene-caption`. Defaults follow the `VVS_*` env vars.
+
+### Bulk index (many videos)
+
+`--sources-file` indexes a whole manifest in one call — one YouTube URL or local path per line, `#` comments and blank lines ignored:
+
+```bash
+cat > videos.txt <<'EOF'
+# a batch of titles
+https://www.youtube.com/watch?v=fBEGOk3ZHw4
+/path/to/talk.mp4
+/path/to/mute-clip.mp4
+EOF
+
+uv run vvs index --sources-file videos.txt --shot-detect --scene-caption
+```
+
+Each line is processed in turn (this stays a plain sequential loop — see `retrieve/bulk.py` for why). Already-indexed videos are skipped so re-running the same manifest is cheap; pass `--rebuild` to force every line to reprocess. One bad URL or unreadable file is reported and skipped, not fatal to the batch — the command exits non-zero only if something failed, after every line has had a chance to run. `--no-ocr`, `--scene-caption` / `--shot-detect` apply to every video in the file.
+
+The **01b · Bulk analyze** section in the live UI does the same thing: paste one URL/path per line and/or drop multiple files, click **Bulk analyze**, and the archive (library grid + query) picks up everything that succeeded.
 
 ### Query
 

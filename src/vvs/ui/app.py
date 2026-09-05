@@ -16,6 +16,7 @@ from vvs.media.clips import attach_corpus_clips
 from vvs.media.transcribe import transcribe_audio_file
 from vvs.models import Hit, IndexMeta, StageTimings
 from vvs.paths import DATA_ROOT
+from vvs.retrieve.bulk import bulk_index, parse_sources
 from vvs.retrieve.embed import warm_models
 from vvs.retrieve.index import (
     build_index,
@@ -101,12 +102,7 @@ def launch(
         if not have_archive
         else f"{archive_n} video(s) already indexed. Ask a question — search covers the whole archive."
     )
-    start_header = (
-        f"### Archive ready\n`{archive_n}` indexed video(s). Analyze another, or ask — "
-        "one query searches all of them."
-        if have_archive
-        else _DEFAULT_HEADER
-    )
+    start_header = _archive_header(archive_n)
 
     def run_query(query: str, vid: str | None, scope_id: str | None = None) -> tuple:
         # Every request is served on its own Gradio worker thread; funnel the
@@ -224,6 +220,27 @@ def launch(
             shot_detect=bool(shot_on),
             progress=progress,
         )
+
+    def bulk_analyze(
+        sources_text: str,
+        files: list[str] | None,
+        scene_on: bool,
+        shot_on: bool,
+        progress: gr.Progress = gr.Progress(),
+    ):
+        sources = parse_sources(sources_text or "")
+        for f in files or []:
+            path = _as_path(f)
+            if path:
+                sources.append(path)
+        if not sources:
+            n = len(list_indexed())
+            return (
+                _archive_header(n),
+                "Paste one or more YouTube URLs / local paths, or upload files, then click **Bulk analyze**.",
+                *_bulk_query_unlock(n > 0),
+            )
+        return compute.run(_bulk_analyze, sources, scene_on, shot_on, progress)
 
     def build_previews(progress: gr.Progress = gr.Progress()) -> None:
         ids = list_indexed()
@@ -385,6 +402,27 @@ def launch(
                 if have_archive
                 else "Waiting for a video. Query unlocks after the first analyze, or if indexes already exist."
             )
+        with gr.Accordion("01b  ·  Bulk analyze (many videos)", open=False):
+            bulk_sources_box = gr.Textbox(
+                label="YouTube URLs or local paths, one per line",
+                placeholder=(
+                    "https://www.youtube.com/watch?v=…\n"
+                    "/path/to/video.mp4\n"
+                    "# lines starting with # are ignored"
+                ),
+                lines=5,
+            )
+            bulk_upload = gr.File(
+                label="Or upload local videos",
+                file_count="multiple",
+                type="filepath",
+                file_types=[".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v"],
+            )
+            bulk_btn = gr.Button("Bulk analyze", variant="primary")
+            bulk_status = gr.Markdown(
+                "Already-indexed videos are skipped automatically; one bad entry does not stop the rest. "
+                "Shot grouping / X-Ray captions above apply to every video in the batch."
+            )
         with gr.Accordion("02  ·  Ask the archive", open=True, elem_classes=["sl-ask"]):
             with gr.Row():
                 query_box = gr.Textbox(
@@ -453,6 +491,11 @@ def launch(
             reanalyze,
             inputs=[source_box, upload, active_vid, scene_box, shot_box],
             outputs=analyze_outputs,
+        ).then(**bump, show_progress="hidden")
+        bulk_btn.click(
+            bulk_analyze,
+            inputs=[bulk_sources_box, bulk_upload, scene_box, shot_box],
+            outputs=[header, bulk_status, query_box, mic, ask_btn, voice_btn],
         ).then(**bump, show_progress="hidden")
         ask_btn.click(
             from_text, inputs=[query_box, active_vid, scope], outputs=result_outputs
@@ -652,6 +695,46 @@ def _ready_header(meta: IndexMeta) -> str:
 
 def _query_unlock(enabled: bool) -> tuple:
     return tuple(gr.update(interactive=enabled) for _ in range(5))
+
+
+def _bulk_query_unlock(enabled: bool) -> tuple:
+    return tuple(gr.update(interactive=enabled) for _ in range(4))
+
+
+def _archive_header(n: int) -> str:
+    if n <= 0:
+        return _DEFAULT_HEADER
+    return (
+        f"### Archive ready\n`{n}` indexed video(s). Analyze another, or ask — "
+        "one query searches all of them."
+    )
+
+
+def _bulk_analyze(
+    sources: list[str],
+    scene_on: bool,
+    shot_on: bool,
+    progress: gr.Progress,
+) -> tuple:
+    """Runs on the dedicated compute thread (see vvs/compute.py). Never call directly
+    from a Gradio callback thread — go through bulk_analyze(), which dispatches here.
+    """
+
+    def on_item_start(i: int, total: int, source: str) -> None:
+        progress(max(0.0, (i - 1) / max(1, total)), desc=f"({i}/{total}) {source}")
+
+    result = bulk_index(
+        sources,
+        scene_caption=bool(scene_on),
+        shot_detect=bool(shot_on),
+        on_item_start=on_item_start,
+    )
+    progress(1.0, desc="done")
+    lines = [f"**Bulk analyze**: {result.summary()}."]
+    for item in result.failed:
+        lines.append(f"- FAILED `{item.source}`: {item.detail}")
+    n = len(list_indexed())
+    return _archive_header(n), "  \n".join(lines), *_bulk_query_unlock(n > 0)
 
 
 def _hit_outputs(hits: list[Hit]) -> tuple:
