@@ -20,11 +20,14 @@ class Settings(BaseSettings):
     data_dir: str | None = Field(default=None, description="Optional data root override")
     host: str = "0.0.0.0"
     port: int = 7860
-    vector_backend: str = Field(default="faiss", description="faiss (POC) or qdrant (prod)")
-    faiss_index_type: str = Field(default="hnsw", description="hnsw or ivf_pq")
-    qdrant_url: str | None = None
-    qdrant_api_key: str | None = None
-    qdrant_shards: int = 8
+    opensearch_url: str = Field(
+        default="http://localhost:9200",
+        description="OpenSearch endpoint. `docker compose up -d` starts one locally.",
+    )
+    opensearch_timeout_s: float = Field(
+        default=10.0,
+        description="Client timeout for OpenSearch requests.",
+    )
     force_mute: bool = Field(
         default=False,
         description="Ignore audio and skip Whisper (mute video path).",

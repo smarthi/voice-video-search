@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from vvs.config import load_settings
-from vvs.paths import demo_questions_path, fallback_html_path, index_path, timings_path
+from vvs.paths import demo_questions_path, fallback_html_path, timings_path
 from vvs.retrieve.embed import warm_models
 from vvs.retrieve.index import ensure_index, index_exists, load_index
 
@@ -25,7 +25,7 @@ def main() -> None:
     vid = ensure_index(settings.source, settings.video_id)
     assert index_exists(vid), vid
     meta = load_index(vid)["meta"]
-    print(f"index  {index_path(vid)}")
+    print(f"index  OpenSearch vvs_visual/vvs_text @ {settings.opensearch_url} (video_id={vid})")
     print(f"title  {meta.title}")
     print(f"frames {len(meta.frames)}  asr {len(meta.transcript)}  ocr {len(meta.ocr)}  slide_heavy={meta.slide_heavy}")
     print(f"timings {timings_path(vid)}")

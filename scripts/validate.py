@@ -64,7 +64,7 @@ def main() -> None:
     if "frame_vecs" in bundle or "transcript_vecs" in bundle:
         raise SystemExit("load_index still returns dense embedding matrices")
     nvis = bundle["visual"].ntotal()
-    print(f"[store] backend=FAISS visual_ntotal={nvis} text={bundle['text'] is not None}")
+    print(f"[store] backend=OpenSearch visual_ntotal={nvis} text={bundle['text'] is not None}")
     ok = 0
     for q in DEFAULT_CHECKS:
         hits = search(vid, q.query, top_k=3, loaded=bundle)

@@ -1,7 +1,8 @@
 """VectorStore protocol: ANN search without loading all embeddings into app RAM.
 
-POC: FaissStore (on-disk, mmap). Prod: QdrantStore (sharded collections).
-Visual embeddings and BGE text live in separate indexes — they are different spaces.
+Backend: OpenSearch, one shared k-NN index per collection (`vvs_visual`,
+`vvs_text`) across the whole archive -- see `retrieve/opensearch_store.py` for
+why, and for the "one index per video" model this replaced.
 """
 
 from __future__ import annotations
@@ -11,8 +12,7 @@ from typing import Any, Protocol, runtime_checkable
 import numpy as np
 from pydantic import BaseModel
 
-from vvs.config import Settings, load_settings
-from vvs.paths import video_dir
+from vvs.config import Settings
 
 
 class VectorPayload(BaseModel):
@@ -53,17 +53,9 @@ class VectorStore(Protocol):
 
     def ntotal(self) -> int: ...
 
+    def all_payloads(self, modality: str | None = None) -> list[VectorPayload]: ...
+
     def close(self) -> None: ...
-
-
-def shard_key(asset_id: str, n_shards: int) -> int:
-    """Stable prod routing: hash(asset_id) % N. Same asset never splits across shards."""
-    import hashlib
-
-    if n_shards <= 0:
-        raise ValueError("n_shards must be positive")
-    digest = hashlib.sha256(asset_id.encode("utf-8")).hexdigest()
-    return int(digest, 16) % n_shards
 
 
 def open_store(
@@ -74,23 +66,10 @@ def open_store(
     settings: Settings | None = None,
     create: bool = False,
 ) -> VectorStore:
-    """Open the visual or text collection for one asset (POC) / shard (prod)."""
-    cfg = settings or load_settings()
-    backend = (cfg.vector_backend or "faiss").strip().lower()
-    if backend == "qdrant":
-        from vvs.retrieve.qdrant_store import QdrantStore
+    """Open the visual or text collection, scoped to one video within the shared index."""
+    from vvs.retrieve.opensearch_store import OpenSearchStore
 
-        store = QdrantStore(video_id, name, settings=cfg)
-        if create:
-            store.create(dim)
-        else:
-            store.open(dim)
-        return store
-    if backend not in {"faiss", ""}:
-        raise SystemExit(f"Unknown VVS_VECTOR_BACKEND={backend!r}. Use faiss or qdrant.")
-    from vvs.retrieve.faiss_store import FaissStore
-
-    store = FaissStore(video_id, name, index_type=cfg.faiss_index_type)
+    store = OpenSearchStore(video_id, name, settings=settings)
     if create:
         store.create(dim)
     else:
@@ -98,10 +77,7 @@ def open_store(
     return store
 
 
-def store_dir(video_id: str) -> Any:
-    return video_dir(video_id)
-
-
 def visual_store_exists(video_id: str) -> bool:
-    root = video_dir(video_id)
-    return (root / "visual.faiss").exists() and (root / "visual.sqlite").exists()
+    from vvs.retrieve.opensearch_store import OpenSearchStore
+
+    return OpenSearchStore(video_id, "visual").ntotal() > 0

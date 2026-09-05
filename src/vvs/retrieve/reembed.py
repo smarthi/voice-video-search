@@ -4,8 +4,8 @@ Re-running `vvs index` to test a second encoder would redo decode, ASR, OCR and
 captioning — minutes of work unrelated to the thing under test — and any
 nondeterminism in keyframe selection would leak into the comparison as if it
 were an encoder difference. Instead this reuses the finished artifacts and
-replaces only `visual.faiss` / `visual.sqlite`, so the two indexes are
-guaranteed to describe the same keyframes and the same text channel.
+replaces only the visual collection's rows for `dest_id`, so the two indexes
+are guaranteed to describe the same keyframes and the same text channel.
 """
 
 from __future__ import annotations
@@ -26,9 +26,9 @@ from vvs.retrieve.embed import (
     visual_dim,
     visual_model_label,
 )
+from vvs.retrieve.opensearch_store import clone_video
 from vvs.retrieve.store import VectorPayload, open_store, visual_store_exists
 
-_TEXT_ARTIFACTS = ("text.faiss", "text.sqlite")
 _LINKED = ("video.mp4",)
 _COPIED = ("timings.json", "demo_questions.json")
 
@@ -57,8 +57,6 @@ def reembed_visual(
 ) -> ReembedResult:
     """Write `dest_id` as `source_id` with a freshly encoded visual store."""
     cfg = settings or load_settings()
-    if (cfg.vector_backend or "faiss").strip().lower() != "faiss":
-        raise SystemExit("reembed requires VVS_VECTOR_BACKEND=faiss")
     if source_id == dest_id:
         raise SystemExit("source and destination ids must differ")
     if not visual_store_exists(source_id):
@@ -89,6 +87,9 @@ def reembed_visual(
         )
 
     _clone_artifacts(src_dir, dst_dir)
+    n_text = clone_video("text", source_id, dest_id, settings=cfg)
+    if n_text:
+        print(f"[reembed] cloned {n_text} text-channel rows (transcript/OCR/scene) unchanged")
     _write_visual(dest_id, cfg, frames, vecs)
     _write_meta(source_id, dest_id, cfg, dim=int(vecs.shape[1]))
 
@@ -121,13 +122,14 @@ def _read_frame_payloads(
 
 
 def _clone_artifacts(src_dir: Path, dst_dir: Path) -> None:
-    """Share the heavy inputs, copy the small state.
+    """Share the heavy inputs, copy the small local state.
 
     Frame JPEGs stay where they are: payload paths keep pointing at the source
     directory, so both indexes read the identical bytes and we avoid duplicating
     a frame set per encoder. The video is symlinked so clip extraction in the UI
-    still works; text stores are copied because search mutates nothing but the
-    two indexes must be independently openable.
+    still works. The text channel (transcript/OCR/scene) lives in the shared
+    OpenSearch index, not on disk, so it is cloned separately via
+    `clone_video("text", ...)` in `reembed_visual`, not copied here.
     """
     for name in _LINKED:
         src = src_dir / name
@@ -138,7 +140,7 @@ def _clone_artifacts(src_dir: Path, dst_dir: Path) -> None:
             link.symlink_to(src.resolve())
         except OSError:
             shutil.copy2(src, link)
-    for name in _TEXT_ARTIFACTS + _COPIED:
+    for name in _COPIED:
         src = src_dir / name
         if src.exists():
             shutil.copy2(src, dst_dir / name)

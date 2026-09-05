@@ -1,6 +1,6 @@
 # On-prem ingest and retrieval — 50 PB design
 
-Status: design, not implemented in this repo.  
+Status: the core idea — one shared OpenSearch index across the archive, not one file per video — is implemented in the prototype as a single local node (`retrieve/opensearch_store.py`, `docker-compose.yml`). Everything else on this page — Kafka ingest, consumer groups, sharded/replicated OpenSearch, the `hybrid` k-NN+BM25 query, vLLM serving — is still design, not implemented in this repo.  
 Audience: platform / ML engineers standing up large-scale ingest and search.  
 Companion: the CPU prototype is [`CONFLUENCE.md`](CONFLUENCE.md). This page is the on-prem shape of the same object model.
 

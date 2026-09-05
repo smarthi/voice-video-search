@@ -1,17 +1,17 @@
 """Bulk ingest: index many videos in one call, sequentially.
 
-Each video's index is independent -- its own FAISS + SQLite files under
-`data/<id>/` -- so bulk ingest is just a loop over `build_index`, with
-per-item error isolation: one bad URL or unreadable file must not abort the
-rest of the batch. Already-indexed videos are skipped unless `rebuild=True`,
-so re-running the same manifest is cheap.
+Each video's rows are independent within the shared OpenSearch index (tagged
+by `video_id`, see `retrieve/opensearch_store.py`), so bulk ingest is just a
+loop over `build_index`, with per-item error isolation: one bad URL or
+unreadable file must not abort the rest of the batch. Already-indexed videos
+are skipped unless `rebuild=True`, so re-running the same manifest is cheap.
 
 This stays a plain sequential loop, not a thread/process pool. On CPU the VLM
 embedding and captioning stages already saturate the machine for one video,
 so concurrent videos would only contend for the same cores. It is also the
-only safe option in the Gradio UI: torch/faiss must run on a single thread
-for the whole process (see `vvs/compute.py`), so callers there should route
-this entire function through `compute.run`, not call it per-video from
+only safe option in the Gradio UI: torch model loading must run on a single
+thread for the whole process (see `vvs/compute.py`), so callers there should
+route this entire function through `compute.run`, not call it per-video from
 several threads.
 """
 

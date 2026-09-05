@@ -1,4 +1,4 @@
-"""Build and load a visual-first ANN index (FAISS POC / Qdrant prod)."""
+"""Build and load a visual-first ANN index (OpenSearch, one shared index per collection)."""
 
 from __future__ import annotations
 
@@ -29,13 +29,11 @@ from vvs.models import (
 )
 from vvs.paths import (
     DATA_ROOT,
-    index_path,
     meta_path,
     read_json_text,
     timings_path,
     video_dir,
     video_path,
-    visual_faiss_path,
     write_json_atomic,
 )
 from vvs.retrieve.embed import (
@@ -45,6 +43,7 @@ from vvs.retrieve.embed import (
     visual_dim,
     visual_model_label,
 )
+from vvs.retrieve.opensearch_store import delete_video
 from vvs.retrieve.store import VectorPayload, open_store, visual_store_exists
 
 StageCallback = Callable[[str], None]
@@ -94,7 +93,7 @@ def build_index(
     timings.ingest_s = perf_counter() - t0
     vid = ingest_info.video_id
     media = Path(ingest_info.path)
-    print(f"[index] video_id={vid} path={media} backend={settings.vector_backend}")
+    print(f"[index] video_id={vid} path={media} backend=opensearch")
 
     shots: list[ShotSpan] = []
     frames = []
@@ -235,7 +234,6 @@ def build_index(
             ocr=bool(ocr_obs),
             asr=bool(segments),
             scene=bool(scenes),
-            vector_backend=settings.vector_backend,
         ),
         models=ModelCard(
             clip=visual_model_label(settings=settings),
@@ -247,12 +245,11 @@ def build_index(
             visual_dim=vdim,
             visual_encoder=encoder_kind(settings=settings),
         ),
-        vector_backend=settings.vector_backend,
     )
     write_json_atomic(meta_path(vid), meta.model_dump_json(indent=2))
     timings.total_s = perf_counter() - started
     write_json_atomic(timings_path(vid), timings.model_dump_json(indent=2))
-    print(f"[index] wrote FAISS stores and {meta_path(vid)}")
+    print(f"[index] wrote OpenSearch collections and {meta_path(vid)}")
     for name, value in timings.model_dump().items():
         print(f"[timing] {name}: {value:.2f}s")
     report("done")
@@ -292,9 +289,7 @@ def format_timings(timings: StageTimings) -> str:
 
 
 def load_index(video_id: str) -> dict[str, Any]:
-    """Open mmap'd stores + metadata. Does not load embedding matrices into NumPy."""
-    if not visual_store_exists(video_id) and index_path(video_id).exists():
-        migrate_npz_to_faiss(video_id)
+    """Open the shared OpenSearch collections, scoped to this video, plus local metadata."""
     meta = IndexMeta.model_validate_json(read_json_text(meta_path(video_id)))
     settings = load_settings()
     visual = open_store(
@@ -316,55 +311,15 @@ def load_index(video_id: str) -> dict[str, Any]:
         write_json_atomic(meta_path(video_id), meta.model_dump_json(indent=2))
         print(f"[index] healed {video_id} meta visual_dim={visual.dim}")
     text = None
-    text_path = video_dir_text_exists(video_id)
-    if text_path:
-        text = open_store(video_id, "text", dim=384, settings=settings, create=False)
+    text_probe = open_store(video_id, "text", dim=384, settings=settings, create=False)
+    if text_probe.ntotal() > 0:
+        text = text_probe
     return {
         "video_id": video_id,
         "meta": meta,
         "visual": visual,
         "text": text,
     }
-
-
-def video_dir_text_exists(video_id: str) -> bool:
-    root = Path(visual_faiss_path(video_id)).parent
-    return (root / "text.faiss").exists() and (root / "text.sqlite").exists()
-
-
-def migrate_npz_to_faiss(video_id: str) -> None:
-    """One-time move from the old in-memory npz into on-disk FAISS + SQLite."""
-    dest = index_path(video_id)
-    meta = IndexMeta.model_validate_json(meta_path(video_id).read_text(encoding="utf-8"))
-    print(f"[index] migrating {dest} → FAISS")
-    arrays = np.load(dest)
-    frame_vecs = np.asarray(arrays["frame_vecs"], dtype=np.float32)
-    transcript_vecs = np.asarray(arrays["transcript_vecs"], dtype=np.float32)
-    ocr_vecs = (
-        np.asarray(arrays["ocr_vecs"], dtype=np.float32)
-        if "ocr_vecs" in arrays.files
-        else np.zeros((0, 384), dtype=np.float32)
-    )
-    arrays.close()
-    _write_stores(
-        video_id,
-        settings=load_settings(),
-        frames=meta.frames,
-        frame_vecs=frame_vecs,
-        segments=meta.transcript,
-        transcript_vecs=transcript_vecs,
-        ocr_obs=meta.ocr,
-        ocr_vecs=ocr_vecs,
-        scenes=meta.scenes,
-        scene_vecs=np.zeros((0, 384), dtype=np.float32),
-    )
-    meta.channels.vector_backend = "faiss"
-    meta.vector_backend = "faiss"
-    if meta.transcript:
-        meta.channels.asr = True
-        meta.channels.transcript = True
-    write_json_atomic(meta_path(video_id), meta.model_dump_json(indent=2))
-    print(f"[index] migrated {video_id}; vectors now live in FAISS (npz kept as backup)")
 
 
 def _write_stores(
@@ -467,9 +422,7 @@ def resolve_video_id(source: str | None, video_id: str | None) -> str:
 def index_exists(video_id: str) -> bool:
     if not meta_path(video_id).exists():
         return False
-    if visual_store_exists(video_id):
-        return True
-    return index_path(video_id).exists()
+    return visual_store_exists(video_id)
 
 
 def ensure_index(source: str | None, video_id: str | None, *, rebuild: bool = False) -> str:
@@ -502,7 +455,7 @@ def _duration(media: Path, frames, segments) -> float:
 
 
 def delete_index(video_id: str) -> bool:
-    """Remove one asset's directory, including frames, stores and preview.
+    """Remove one asset's rows from the shared OpenSearch index, plus its local directory.
 
     Guarded so a stray id can never escape the data root: the target must be a
     direct child of it. Returns False when there was nothing to delete.
@@ -513,6 +466,7 @@ def delete_index(video_id: str) -> bool:
     target = video_dir(video_id).resolve()
     if target == root or target.parent != root:
         raise SystemExit(f"refusing to delete {target}: not a direct child of {root}")
+    delete_video(video_id)
     if not target.exists():
         return False
     shutil.rmtree(target)

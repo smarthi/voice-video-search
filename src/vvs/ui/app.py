@@ -88,10 +88,10 @@ def launch(
     if warm:
         print("[app] warming models…")
         # Warm on the dedicated compute thread, not this (main) thread: every
-        # request lands on a different Gradio worker thread, and torch/faiss
-        # segfault the moment a *second* distinct thread touches them (see
-        # vvs/compute.py). Warming here on main would just be the first of
-        # those crashes waiting to happen.
+        # request lands on a different Gradio worker thread, and the first
+        # model load segfaults the moment it happens on a thread other than
+        # the one it started on (see vvs/compute.py). Warming here on main
+        # would just be the first of those crashes waiting to happen.
         compute.run(warm_models)
         print("[app] models ready")
 
@@ -106,7 +106,7 @@ def launch(
 
     def run_query(query: str, vid: str | None, scope_id: str | None = None) -> tuple:
         # Every request is served on its own Gradio worker thread; funnel the
-        # actual torch/faiss work onto the one dedicated compute thread (see
+        # actual torch model work onto the one dedicated compute thread (see
         # vvs/compute.py) so it never runs on two different threads.
         return compute.run(_run_query, query, vid, scope_id)
 

@@ -12,18 +12,17 @@ import os
 # running that op on CPU.
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
-# faiss-cpu and torch each bundle their own copy of the LLVM OpenMP runtime
-# (faiss/.dylibs/libomp.dylib and torch/lib/libomp.dylib on macOS arm64).
-# Whichever initializes second makes OpenMP abort the process, which is why
-# FAISS search — an OpenMP-parallel path — could die while single-threaded
-# index writes survived. Allowing the duplicate is the upstream-documented
-# escape hatch and is what every torch+faiss stack on macOS relies on. It is a
-# mitigation, not a cure: the cure is one OpenMP runtime in the process, which
-# needs coordinated wheel builds we do not control. Harmless where there is only
-# one runtime, as on the Linux manylinux wheels.
+# Historically needed because faiss-cpu and torch each bundled their own copy
+# of the LLVM OpenMP runtime on macOS arm64, and whichever initialized second
+# made OpenMP abort the process. FAISS is gone now (search runs server-side in
+# OpenSearch; see retrieve/opensearch_store.py), so that specific collision is
+# retired. Left as a harmless setdefault rather than removed: onnxruntime
+# (via rapidocr) is still a native library in this process, and this is the
+# documented escape hatch if it or anything else ever bundles a duplicate
+# runtime. Costs nothing when there is no duplicate to allow.
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
-# Native crashes in torch, faiss, onnxruntime or the bundled FFmpeg kill the
+# Native crashes in torch, onnxruntime or the bundled FFmpeg kill the
 # process with a signal, so Python raises nothing and the only trace left is the
 # resource tracker's "leaked semaphore objects" note at shutdown -- which names
 # neither the cause nor the library. faulthandler turns that silence into a C

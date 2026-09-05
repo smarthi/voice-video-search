@@ -21,13 +21,13 @@ On-prem scale-out — OpenSearch hybrid k-NN + BM25, sharding for a 50 PB archiv
 Turn one or more long-form videos into a searchable archive on a laptop.
 
 1. Pick any YouTube URL or local file (including mute video with no audio track). Repeat for more titles.
-2. Analyze once on CPU: stills, optional speech, Qwen-VL + BGE embeddings into per-video FAISS.
+2. Analyze once on CPU: stills, optional speech, Qwen-VL + BGE embeddings into the shared OpenSearch collections.
 3. Ask a question by typed text (voice is optional if a file has audio). **One query searches every indexed title.**
 4. Play the matching moments as clips, labeled by title, with the original still, real start–end timestamps, and a confidence score.
 
 This is a C-level demo, not a product. A rehearsed CTO interview (`fBEGOk3ZHw4`) is an optional paste-in example. Index a second title (music video, mute clip) and the same Search box covers the whole archive.
 
-Production-shaped retrieval: visual-first ANN plus a text channel, ranked by comparable scores. This POC fans out across on-disk FAISS files. The on-prem design replaces that fan-out with one OpenSearch hybrid query — see §6.3.
+Production-shaped retrieval: visual-first ANN plus a text channel, ranked by comparable scores. This POC already runs on one shared OpenSearch index per collection (§6.1), a single local node rather than a sharded cluster. The on-prem design replaces the current per-channel k-NN calls with one OpenSearch `hybrid` query and scales the same index out to a cluster — see §6.3.
 
 ---
 
@@ -37,9 +37,9 @@ Production-shaped retrieval: visual-first ANN plus a text channel, ranked by com
 | --- | --- |
 | A local prototype: ingest, index, query the **archive**, play clips | A full 50 PB deployment |
 | Visual-first semantic search: Qwen-VL frames + BGE (OCR / captions / ASR if audio) | A keyword / filename scan |
-| On-disk FAISS ANN + SQLite payload (`visual.faiss`, `text.faiss` per video) | Embeddings loaded as a dense matrix in app RAM |
+| OpenSearch k-NN ANN + payload (`vvs_visual`, `vvs_text`, shared across the archive) | Embeddings loaded as a dense matrix in app RAM |
 | Archive merge by **absolute ANN scores** (picture + caption + transcript + OCR) | Ranking by per-video RRF “confidence” or query-word keep/drop |
-| A `VectorStore` interface with a Qdrant stub (`VVS_VECTOR_BACKEND=qdrant`) | The on-prem target, which is OpenSearch (§6.3) |
+| A `VectorStore` interface with one real implementation (`OpenSearchStore`) | A sharded, replicated cluster with Kafka ingest (the on-prem target, §6.3) |
 | Gradio UI with a custom visual language | Any third-party retrieval service or backend |
 | CPU PyTorch (`pytorch-cpu` wheel index) | A GPU or cloud inference path |
 
@@ -53,9 +53,9 @@ The app starts empty unless `data/` already has indexes — then Search is unloc
 
 1. Paste a YouTube URL or local path, or upload `.mp4` / `.webm` / `.mkv` / `.mov` / `.avi` / `.m4v`.
 2. Optional analyze options (independent — check **both** for one pass): **Group shots with TransNetV2**, then **Describe scenes** (Qwen3-VL-2B-Instruct captions those scenes).
-3. Click Analyze video. Pipeline: ingest, stills (shots or 2 fps), Whisper only if an audio track exists, OCR, optional scene captions, Qwen-VL + BGE, write FAISS indexes.
-4. Repeat Analyze for a second title if you want archive hits from more than one file.
-5. If `data/<video_id>/visual.faiss` and `meta.json` already exist, the index is reused. Re-analyze rebuilds from scratch.
+3. Click Analyze video. Pipeline: ingest, stills (shots or 2 fps), Whisper only if an audio track exists, OCR, optional scene captions, Qwen-VL + BGE, write to the shared OpenSearch collections.
+4. Repeat Analyze for a second title if you want archive hits from more than one file, or use **01b · Bulk analyze** to do several at once.
+5. If this video already has rows in the shared index and `meta.json` exists, the index is reused. Re-analyze rebuilds from scratch.
 6. Type a question and Search. That query searches **every** indexed video. Clips are labeled by title. Mic / Transcribe + search is optional and only useful when a source has speech.
 7. Top 3 hits become playable H.264 clips. Mute assets get a silent shot window. Gallery and match timeline show the rest of the rank list.
 
@@ -120,7 +120,7 @@ WSL note: open the printed localhost URL from Windows. The browser owns the micr
 
 ## 4. Architecture
 
-![Architecture: ingest, FAISS visual and text indexes, archive query](images/architecture.png)
+![Architecture: ingest, OpenSearch visual and text indexes, archive query](images/architecture.png)
 
 ### 4.1 Analyze pipeline
 
@@ -135,8 +135,8 @@ Numbered pipeline:
 5. OCR — RapidOCR on kept JPEGs. This is the on-screen text channel.
 6. Optional X-Ray — stills clustered into scenes; **Qwen3-VL-2B-Instruct** captions the representative still (BLIP fallback). Embedded with BGE as `modality="scene"`.
 7. Embed — **Qwen3-VL-Embedding-2B** on **one still** (2048-d, shared image/text space). BGE-small on OCR / transcript / captions (384-d). L2-normalized. CLIP ViT-B-32 (512-d) remains available for old indexes via `VVS_VISUAL_ENCODER=clip`. The official encode API also takes `{"video": frames, "fps", "max_frames"}` — **not used on this CPU box**. Later, on a GPU / larger server: one short window (~1 s, 6–8 frames) per kept still, same 2048-d collection. Do not smash the whole title into one vector.
-8. Vector store — two FAISS indexes **per video**, mmap’d from disk, plus SQLite payloads keyed by `vector_id`. Visual and text are separate spaces and are never mixed in one index. Do not smash CLIP 512 and Qwen 2048 into one FAISS file.
-9. Search — Qwen-VL (or CLIP) query vs each visual FAISS; BGE query vs each text FAISS; lexical IDF on ANN candidates; RRF **inside** a video; **archive merge by absolute ANN scores**; hydrate path / timestamp / quote / `asset_id` from SQLite.
+8. Vector store — two OpenSearch indexes, `vvs_visual` and `vvs_text`, **shared across the whole archive** and filtered by `video_id`, not one file per video. Visual and text are separate spaces (different vector widths) and are never mixed in one index. Do not smash CLIP 512 and Qwen 2048 into one collection — a shared index has one fixed vector width; see `retrieve/opensearch_store.py`.
+9. Search — Qwen-VL (or CLIP) query vs `vvs_visual` filtered to the video; BGE query vs `vvs_text` filtered the same way; lexical IDF on ANN candidates; RRF **inside** a video; **archive merge by absolute ANN scores**; hydrate path / timestamp / quote / `asset_id` from the same OpenSearch row.
 10. Clip extract — H.264 + AAC from **that** asset’s `video.mp4`. With speech: play the full supporting transcript (cap 60 s). Mute: the shot span, not ±2 s around a keyframe.
 11. UI — Gradio “Voice Video Search”: three clip cards labeled by title, original stills, captions, gallery, match-density timeline.
 
@@ -148,8 +148,8 @@ Object model (one row per embedding):
 
 | Field | Meaning |
 | --- | --- |
-| `vector_id` | uint64 id in FAISS |
-| `asset_id` | Video or still id |
+| `vector_id` | Legacy per-video id; OpenSearch documents are addressed by `_id`, not this field |
+| `asset_id` | Video or still id (the shared index's `video_id` filter field) |
 | `t_s` | Timestamp (0 for stills) |
 | `modality` | `video_frame`, `still`, `ocr`, `transcript`, or `scene` |
 | `path` | Frame or media URI |
@@ -163,7 +163,7 @@ Object model (one row per embedding):
 
 ## 5. Models
 
-Recorded on each index in `meta.json` under `models`. Search uses the encoder that **wrote** the index (`models.clip` / `models.visual_encoder` / `visual_dim`). `load_index` heals `visual_dim` from the FAISS store if meta is stale.
+Recorded on each index in `meta.json` under `models`. Search uses the encoder that **wrote** the index (`models.clip` / `models.visual_encoder` / `visual_dim`). `load_index` heals `visual_dim` from the OpenSearch store if meta is stale.
 
 WeMM-Embedding-2B and Qwen3-VL-Embedding-2B are **both 2048-d**, so dimension
 alone cannot identify an index. Every index therefore records
@@ -202,10 +202,18 @@ forward passes where an embedding costs one.
 
 ### 5.2 Duplicate native runtimes
 
-Two independent library duplications affect this stack. They are worth keeping
-apart, because one is fatal and the other only looks alarming.
+Two independent library duplications affected this stack. They are worth
+keeping apart, because one was fatal and the other only looks alarming — and
+the fatal one is now retired along with the dependency that caused it.
 
-**OpenMP — fatal, fixed.** `faiss-cpu` and `torch` each bundle their own copy of
+**OpenMP — fatal, retired with FAISS.** This POC used to carry `faiss-cpu` for
+on-disk ANN; it collided with torch on macOS the way described below. FAISS
+search now runs server-side in OpenSearch (§6.1), not as an in-process
+library, so there is no second copy of anything for torch to collide with.
+Kept here because the *mechanism* that fixed it, a single dedicated compute
+thread (`vvs/compute.py`), is still load-bearing for an unrelated crash: model
+loading in transformers hits the same non-main-thread segfault shape,
+independent of FAISS. `faiss-cpu` and `torch` each bundled their own copy of
 the LLVM OpenMP runtime; on macOS arm64 these are `faiss/.dylibs/libomp.dylib`
 and `torch/lib/libomp.dylib`. This produces two distinct failures.
 
@@ -224,25 +232,22 @@ signal death into a C traceback naming `swigfaiss.search` beneath
 `leaked semaphore objects` warning, which is emitted merely because the process
 was killed and names neither step nor library.
 
-The fix is to keep FAISS single-threaded on macOS so the parallel region is never
-opened. `faiss_thread_default()` in `retrieve/faiss_store.py` returns 1 on Darwin
-and 0 ("leave FAISS alone") elsewhere, `VVS_FAISS_THREADS` overrides it, and every
-faiss import is funnelled through a single pinned loader so that no call site can
-bypass the limit — a stray `import faiss` would silently reintroduce the crash, so
-a test asserts the loader is the only importer. The cost is nil: these are
-per-video HNSW indexes of a few thousand vectors, where ANN search is microseconds
-against a query embedding measured in seconds, and pinning returns byte-identical
-scores. Linux keeps FAISS's default because its manylinux wheels do not introduce
-a second OpenMP runtime. For the on-prem build, where the container image is ours
-to define, the cleaner answer is to link one OpenMP runtime process-wide and drop
-both workarounds.
+Pinning FAISS to one thread turned out not to fix this either — the fork/join
+barrier machinery runs regardless of team size, and the real condition was
+thread identity, not thread count: the first thread to call in was fine, any
+different thread calling in later reliably crashed. The actual fix was the
+same dedicated-thread approach used today (`vvs/compute.py`), just aimed at a
+FAISS-specific symptom that no longer exists. Now that OpenSearch does this
+work server-side, the whole class of "which OS thread touches the native ANN
+library" question is moot for search — it still matters for torch model
+loading, which is why `vvs/compute.py` remains.
 
 **Surviving the abort.** Because an OpenMP abort can land mid-write, `meta.json`
 is written atomically: temp file, `fsync`, then `os.replace`, with the previous
 copy rotated to `meta.json.bak` and readers falling back to it when the primary
 will not parse. This is not incidental hardening. `meta.json` holds the
 transcript, the scene captions and the OCR text, none of which are recoverable
-from the FAISS stores, so losing it means re-running the captioner across the
+from the OpenSearch collections, so losing it means re-running the captioner across the
 whole asset. And a truncated file is worse than a missing one, because
 `index_exists()` only tests for presence: a half-written file left the video
 listed but unparseable, so it vanished from the library with no explanation.
@@ -292,21 +297,19 @@ timestamp judgments exist, plus rank overlap, Spearman agreement and latency.
 
 ### 6.1 POC (this demo)
 
-`VVS_VECTOR_BACKEND=faiss` (default).
+OpenSearch, one shared node (`docker compose up -d`), `VVS_OPENSEARCH_URL` to point elsewhere.
 
-- `FaissStore` writes `data/<id>/visual.faiss` and `text.faiss`, mmap’d on read (`IO_FLAG_MMAP`).
-- Small indexes use HNSW (inner product on L2-normalized vectors). Larger ones can use IVF-PQ (`VVS_FAISS_INDEX_TYPE=ivf_pq`).
-- Payload lives in `visual.sqlite` / `text.sqlite`, not in process JSON.
-- Query returns ids + scores; the app hydrates path, timestamp, quote, and `shot_id` from SQLite.
-- Archive search is a **fan-out**: embed once, search every `data/<id>/`, merge.
+- `OpenSearchStore` (`retrieve/opensearch_store.py`) writes to two indexes shared across the **whole archive**: `vvs_visual` and `vvs_text`, each row tagged with `video_id`. Not one file per video.
+- Both collections use HNSW k-NN (inner product on L2-normalized vectors), one fixed vector width per index — a real limitation versus the old per-video files: mixing CLIP-512 and Qwen-2048 videos now needs two separate indexes, not one archive.
+- Payload (path, timestamp, `text`, `shot_id`, motion/flash) lives on the same OpenSearch document as its vector, not in a separate store.
+- Query returns ids + scores; the app hydrates path, timestamp, quote, and `shot_id` straight from that document's `_source`.
+- Archive search still loops per video (embed once, k-NN each video's rows, merge) rather than one global query — see the `opensearch_store.py` module docstring for why: a true archive-wide `hybrid` query would fuse visual and text scores server-side, discarding the per-channel ranks §8's RRF fusion depends on.
 
-**FAISS + SQLite is not “SQLite does keywords.”** FAISS is the only ANN. SQLite is the payload sidecar. Lexical ranking runs in Python on ANN candidates only. There is no FTS5 / BM25 table.
+**OpenSearch k-NN is the only ANN here, not BM25.** Lexical ranking still runs in Python on ANN candidates only, the same as before. OpenSearch's own BM25 engine is available on the text fields but deliberately unused for the reason above.
 
-### 6.2 The Qdrant stub in the code
+### 6.2 What changed from the original FAISS + SQLite design
 
-`VVS_VECTOR_BACKEND=qdrant` plus `VVS_QDRANT_URL` selects `QdrantStore`, which implements the same `VectorStore` surface (`create`, `add`, `search`, `close`) and exits with a one-line message when unwired. It exists to prove the interface is not FAISS-shaped.
-
-**It is not the on-prem target any more.** Qdrant has no BM25, and the on-prem requirement is hybrid k-NN + BM25 in one engine. Leave the stub for interface tests; do not plan a deployment on it.
+This section documented `FaissStore` (one `.faiss` + `.sqlite` pair per video, mmap'd) and a `QdrantStore` stub proving the `VectorStore` interface wasn't FAISS-shaped. Both are gone: `OpenSearchStore` is the only implementation now, and it already is the shape §6.2 used to gesture at wanting. The interface itself (`create`, `add`, `search`, `close`) did not change — only what implements it.
 
 ### 6.3 On-prem target: OpenSearch hybrid
 
@@ -319,7 +322,7 @@ One index, **one document per ~20 s segment**, `_id = segment_id`:
 - `asset_id`, `source_class`, `rights`, `wrap`, `pack_ids` — `keyword` filters
 - `still_uri`, `t0`, `t1`, `motion_energy`, `flash_energy` — payload
 
-Retrieval is one `hybrid` query: a `knn` clause on `visual_vector` plus a `multi_match` on `caption^2` / `ocr` / `transcript`, fused by a search pipeline (RRF first, weighted `min_max` once a judgment list exists). That replaces the per-video FAISS fan-out and the Python merge in §8.
+Retrieval is one `hybrid` query: a `knn` clause on `visual_vector` plus a `multi_match` on `caption^2` / `ocr` / `transcript`, fused by a search pipeline (RRF first, weighted `min_max` once a judgment list exists). That replaces the per-video k-NN fan-out and the Python RRF/merge in §8 with one server-side call — the next step past what §6.1 runs today.
 
 **Sharding for a 50 PB archive, in one table.** The sizing input is segment count, not petabytes — pixels never enter the index:
 
@@ -361,9 +364,9 @@ Duration: 263.0 s. Not hardcoded.
 | dHash | 16×16 (256-bit) | Near-duplicate if similarity is at least 0.92 |
 | `uniform_interval_s` | 4.0 | Force-keep even if visually similar |
 
-About 66 frames from the 4 s floor plus about 83 scene-change extras. Those 149 visual vectors live in `visual.faiss` (512-d if this tape was indexed with CLIP; 2048-d after a Qwen re-analyze).
+About 66 frames from the 4 s floor plus about 83 scene-change extras. Those 149 visual vectors live in `vvs_visual`, tagged with this video's id (512-d if this tape was indexed with CLIP; 2048-d after a Qwen re-analyze — see §6.1 on why a shared index can't hold both at once).
 
-**12 transcript segments** — Whisper native turns (this file has audio). Typical 10–30 s Q&A chunks, 0.00–262.8 s. They are BGE-indexed in `text.faiss` together with OCR (and scene) rows. A mute file would have zero transcript segments and still be searchable via Qwen-VL + OCR / captions.
+**12 transcript segments** — Whisper native turns (this file has audio). Typical 10–30 s Q&A chunks, 0.00–262.8 s. They are BGE-indexed in `vvs_text` together with OCR (and scene) rows, this video's id filtering them out of every other video's rows. A mute file would have zero transcript segments and still be searchable via Qwen-VL + OCR / captions.
 
 | # | Start–end | Topic (abridged) |
 | --- | --- | --- |
@@ -388,7 +391,7 @@ Only this interview’s ASR contains the word **robotics** (`I'm leading up rese
 
 ![Semantic search: visual and text ANN, per-video RRF, archive merge by ANN scores](images/search.png)
 
-Code: `retrieve/search.py`. Visual FAISS is always on. Text FAISS holds OCR plus optional transcript and scene captions.
+Code: `retrieve/search.py`. `vvs_visual` k-NN is always on. `vvs_text` k-NN holds OCR plus optional transcript and scene captions.
 
 ### 8.1 Query flow
 
@@ -420,7 +423,7 @@ corpus_relevance = max( visual + 1.15×caption + 0.55×OCR,
                  + 0.45×motion/flash   # only if the query asks for that
 ```
 
-Picture path and spoken path compete (`max`), they are not summed. BGE-small cosine is ~0.65 on unrelated talk; adding transcript onto every interview made “trumpet” return the interview clip over a saxophone still. A real spoken hit still wins max() against a random picture. Motion/flash are decode-time scalars, not a video transformer. “Moving tornado” boosts high `motion_energy`; “lightning” boosts `flash_energy`; a plain “tornado” query does not. **Re-analyze** to populate those fields. On a larger server, replace (or add) the still vector with an N-frame Qwen-VL window so “moving” lives in the embedding — same FAISS dim, opt-in Re-analyze. We do **not** keep-or-drop a title because a caption contains the query words. One strong title may take every slot.
+Picture path and spoken path compete (`max`), they are not summed. BGE-small cosine is ~0.65 on unrelated talk; adding transcript onto every interview made “trumpet” return the interview clip over a saxophone still. A real spoken hit still wins max() against a random picture. Motion/flash are decode-time scalars, not a video transformer. “Moving tornado” boosts high `motion_energy`; “lightning” boosts `flash_energy`; a plain “tornado” query does not. **Re-analyze** to populate those fields. On a larger server, replace (or add) the still vector with an N-frame Qwen-VL window so “moving” lives in the embedding — same `vvs_visual` dim, opt-in Re-analyze. We do **not** keep-or-drop a title because a caption contains the query words. One strong title may take every slot.
 
 Worked examples on a mixed archive (interview clip + Roja + Careless Whisper / Jennifer Connelly):
 
@@ -435,7 +438,7 @@ Worked examples on a mixed archive (interview clip + Roja + Careless Whisper / J
 
 Pin one file with `vvs query --video-id ID` (or `--source`). Mixed CLIP 512-d and Qwen 2048-d indexes in one archive still search, but their visual cosines are not perfectly comparable — re-analyze old CLIP titles on Qwen if you care about picture-vs-picture ties.
 
-**On-prem equivalent.** The `max(...)` blend above is Python over two FAISS spaces. In OpenSearch the same competition is a `hybrid` query whose clauses are visual k-NN and BM25, fused by a search pipeline. The design rule survives the port: relevance comes from comparable cross-channel scores, never from query-word keep/drop. See [`CONFLUENCE_ONPREM.md`](CONFLUENCE_ONPREM.md) §6.4.
+**On-prem equivalent.** The `max(...)` blend above is Python over two OpenSearch k-NN queries (visual vs. text), the same shared archive-wide indexes this POC already writes to (§6.1). The on-prem step still ahead of this repo is folding those two k-NN calls plus BM25 into one `hybrid` query fused by a search pipeline. The design rule survives that port either way: relevance comes from comparable cross-channel scores, never from query-word keep/drop. See [`CONFLUENCE_ONPREM.md`](CONFLUENCE_ONPREM.md) §6.4.
 
 ---
 
@@ -465,12 +468,11 @@ Per video, under `data/<video_id>/` (`VVS_DATA_DIR` overrides the root):
 | `frames/` | Representative JPEGs (2 fps set, or TransNet stills) |
 | `clips/` | On-demand H.264 hits |
 | `preview.mp4` | Cached 6 s library preview (silent, 480px). Kept outside `clips/` so `attach_clips` does not prune it |
-| `visual.faiss` / `visual.sqlite` | Qwen-VL (or WeMM / CLIP) ANN + payload (`asset_id`, `shot_id`, path, `t_s`, motion/flash) |
-| `text.faiss` / `text.sqlite` | BGE ANN + payload (OCR / transcript / scene) |
 | `meta.json` | Title, duration, frames, shots, transcript, OCR, scene cards, channels, models |
 | `timings.json` | Stage seconds |
 | `ingest.json` | Source / title / duration / uploader / description |
-| `index.npz` | Legacy backup only if the asset was migrated; not used at query time |
+
+Not under `data/`: vectors and their payload (`asset_id`, `shot_id`, path, `t_s`, motion/flash) live in OpenSearch, in the shared `vvs_visual` (Qwen-VL / WeMM / CLIP) and `vvs_text` (BGE: OCR / transcript / scene) indexes, filtered by `video_id`. Deleting a video's `data/<video_id>/` directory alone leaves those rows behind — use the app's delete flow, which purges both.
 
 ---
 
@@ -481,7 +483,7 @@ src/vvs/
   cli.py config.py models.py paths.py
   ingest/     YouTube + local file ingest
   media/      frames, shots (TransNetV2), motion/flash, clips, transcribe, ocr, scenes, caption
-  retrieve/   embed, index, search, VectorStore (FAISS / Qdrant stub)
+  retrieve/   embed, index, search, VectorStore (OpenSearch)
   ui/         Gradio app, custom theme, timeline
 scripts/      build_index.py, query.py, validate.py
 tests/        store / mute / shots / scenes / corpus (no VLM download)
@@ -491,7 +493,7 @@ tests/        store / mute / shots / scenes / corpus (no VLM download)
 | --- | --- |
 | `ingest/` | Resolve YouTube id or local slug; download or copy to `video.mp4` |
 | `media/` | Keyframes, TransNet shots, optional Whisper, RapidOCR, scene cards, clip cut |
-| `retrieve/` | Qwen-VL or CLIP + BGE, FAISS write/mmap, per-video RRF, archive ANN merge, motion/flash boost |
+| `retrieve/` | Qwen-VL or CLIP + BGE, OpenSearch write/k-NN, per-video RRF, archive ANN merge, motion/flash boost |
 | `ui/` | Gradio + custom CSS (style only); Search calls `search_corpus` |
 
 Public commands: `uv run vvs index`, `query`, `app`, `warm`, `list`.
@@ -500,11 +502,12 @@ Public commands: `uv run vvs index`, `query`, `app`, `warm`, `list`.
 
 ## 12. How to run
 
-Requirements: Python 3.12+, `uv`, about 8 GB RAM (Qwen-VL Embedding 2B is heavier than CLIP; Instruct captioning loads a second 2B VL). Network on first model/video download.
+Requirements: Python 3.12+, `uv`, Docker, about 8 GB RAM (Qwen-VL Embedding 2B is heavier than CLIP; Instruct captioning loads a second 2B VL). Network on first model/video download.
 
 ```
 cd video-voice-search
 uv sync
+docker compose up -d   # local single-node OpenSearch on :9200
 uv run vvs app
 ```
 
@@ -520,9 +523,9 @@ uv run vvs app
 | Preload weights | `uv run vvs warm` |
 | List indexes | `uv run vvs list` |
 
-Env: `VVS_SOURCE`, `VVS_VIDEO_ID` (optional prefill), `VVS_DATA_DIR`, `VVS_VECTOR_BACKEND` (`faiss` or `qdrant`), `VVS_FAISS_INDEX_TYPE` (`hnsw` or `ivf_pq`), `VVS_QDRANT_URL`, `VVS_FORCE_MUTE`, `VVS_SHOT_DETECT`, `VVS_SCENE_CAPTION`, `VVS_SCENE_CAPTION_MODEL` (`qwen_vl` / `blip`), `VVS_VISUAL_ENCODER` (`qwen_vl` or `clip`), `VVS_VISUAL_MODEL`, `VVS_DEVICE`, `VVS_VISUAL_DTYPE`, `VVS_VISUAL_BATCH`.
+Env: `VVS_SOURCE`, `VVS_VIDEO_ID` (optional prefill), `VVS_DATA_DIR`, `VVS_OPENSEARCH_URL` (default `http://localhost:9200`), `VVS_OPENSEARCH_TIMEOUT_S`, `VVS_FORCE_MUTE`, `VVS_SHOT_DETECT`, `VVS_SCENE_CAPTION`, `VVS_SCENE_CAPTION_MODEL` (`qwen_vl` / `blip`), `VVS_VISUAL_ENCODER` (`qwen_vl` or `clip`), `VVS_VISUAL_MODEL`, `VVS_DEVICE`, `VVS_VISUAL_DTYPE`, `VVS_VISUAL_BATCH`.
 
-Optional extra for a real Qdrant client: `uv sync --extra qdrant`.
+`docker compose up -d` starts a local single-node OpenSearch on `:9200`; see `docker-compose.yml`.
 
 ---
 
@@ -535,7 +538,7 @@ Optional extra for a real Qdrant client: `uv sync --extra qdrant`.
 | Analyze is minutes | OCR or VLM captioning is usually the slowest stage |
 | Visual is pictures | OCR / captions / transcript carry the words; Qwen-VL matches what the frame looks like |
 | Rehearse the questions | Five tuned queries hit the expected window in the top 3 on the example tape; `robotics` must beat a music-video still in an archive |
-| This box indexes one (or a few) videos | The code path is add / mmap-search / hydrate — the same shape as a sharded store |
+| This box indexes one (or a few) videos | The code path is add / k-NN search / hydrate against a single-node OpenSearch — the same shape as a sharded cluster |
 | Mixed encoders | CLIP 512-d and Qwen 2048-d indexes can coexist; visual scores are not perfectly comparable until you re-analyze |
 | Mic / WSL | Use the Windows browser against localhost |
 
@@ -581,9 +584,8 @@ Style only. Retrieval, models, and storage are this repo. No external UI service
 | Visual | `VVS_VISUAL_ENCODER` | qwen_vl |
 | Visual | `VVS_VISUAL_MODEL` | Qwen3-VL-Embedding-2B |
 | Captions | `VVS_SCENE_CAPTION_MODEL` | qwen_vl |
-| Store | `VVS_VECTOR_BACKEND` | faiss |
-| Store | `VVS_FAISS_INDEX_TYPE` | hnsw |
-| Store | `VVS_QDRANT_SHARDS` | 8 |
+| Store | `VVS_OPENSEARCH_URL` | http://localhost:9200 |
+| Store | `VVS_OPENSEARCH_TIMEOUT_S` | 10 |
 | Per-video RRF | `RRF_K` | 60 |
 | Per-video RRF | `TEXT_WEIGHT` | 1.6 |
 | Per-video RRF | `OCR_WEIGHT` / `OCR_MIN_SCORE` | 0.6 / 0.28 |

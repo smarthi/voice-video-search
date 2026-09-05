@@ -22,7 +22,6 @@ from vvs.retrieve.search import (
     search,
     search_corpus,
 )
-from vvs.retrieve.store import shard_key
 
 __all__ = [
     "build_index",
@@ -41,7 +40,6 @@ __all__ = [
     "merge_corpus_hits",
     "search",
     "search_corpus",
-    "shard_key",
     "should_run_asr",
     "warm_models",
 ]

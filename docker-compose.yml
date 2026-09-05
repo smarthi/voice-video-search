@@ -1,0 +1,31 @@
+services:
+  opensearch:
+    image: opensearchproject/opensearch:2.19.1
+    container_name: vvs-opensearch
+    environment:
+      - discovery.type=single-node
+      - plugins.security.disabled=true
+      - bootstrap.memory_lock=true
+      # Only used to satisfy the security plugin's startup check; the plugin
+      # itself is disabled above, so nothing actually authenticates with this.
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=Vvs!DevOnly1
+      # Single-node dev instance holding a few hundred to a few thousand
+      # vectors (see retrieve/opensearch_store.py) -- 512m is generous, not a
+      # sizing recommendation for the on-prem design in
+      # docs/CONFLUENCE_ONPREM.md.
+      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    volumes:
+      - vvs-opensearch-data:/usr/share/opensearch/data
+
+volumes:
+  vvs-opensearch-data:

@@ -162,7 +162,7 @@ def encoder_kind(*, meta=None, settings=None) -> str:
 
 
 def visual_dim(*, settings=None, meta=None) -> int:
-    """FAISS dim for the visual collection. Must match the encoder that wrote it."""
+    """Vector width for the visual collection. Must match the encoder that wrote it."""
     if meta is not None:
         stored = getattr(getattr(meta, "models", None), "visual_dim", None)
         if stored:

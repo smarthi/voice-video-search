@@ -1,7 +1,7 @@
 """Frame-to-frame motion and flash from the decode we already do.
 
 The visual encoder is still-only. These scalars are the temporal sidecar:
-L1 / luma jump on a tiny gray image, stored on the keyframe and FAISS payload.
+L1 / luma jump on a tiny gray image, stored on the keyframe and vector store payload.
 Query time only boosts ANN candidates when the question asks for motion or a flash.
 """
 

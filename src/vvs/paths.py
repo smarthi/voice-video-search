@@ -20,7 +20,7 @@ def write_json_atomic(path: Path, payload: str) -> None:
 
     The previous copy is rotated to `.bak` rather than overwritten, because
     meta.json holds the transcript, scene captions and OCR text, none of which
-    can be reconstructed from the FAISS stores. Losing it means re-running the
+    can be reconstructed from the OpenSearch collections. Losing it means re-running the
     captioner over the whole video. `read_json_text` reads the backup when the
     primary is unusable.
     """
@@ -86,19 +86,6 @@ def preview_path(video_id: str) -> Path:
     that directory whose name does not match its own `clip_<tag>_...` pattern.
     """
     return video_dir(video_id) / "preview.mp4"
-
-
-def index_path(video_id: str) -> Path:
-    """Legacy NumPy archive. New indexes use FAISS files; this is migrate-only."""
-    return video_dir(video_id) / "index.npz"
-
-
-def visual_faiss_path(video_id: str) -> Path:
-    return video_dir(video_id) / "visual.faiss"
-
-
-def visual_sqlite_path(video_id: str) -> Path:
-    return video_dir(video_id) / "visual.sqlite"
 
 
 def meta_path(video_id: str) -> Path:

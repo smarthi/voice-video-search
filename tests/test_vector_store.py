@@ -1,33 +1,43 @@
-"""Lightweight checks for the VectorStore path (no model download)."""
+"""Checks for the OpenSearch-backed VectorStore (no model download).
+
+These need a reachable OpenSearch (`docker compose up -d`); each test skips
+itself with a printed reason when one isn't there, the same way
+`test_force_mute_skips_asr` skips when the demo video isn't present.
+
+Each test gets its own disposable index name (not the real archive's
+vvs_visual/vvs_text, which already hold real vectors at a fixed dimension)
+so tests can freely pick whatever dimension is convenient and clean up by
+just dropping the whole index afterward.
+"""
 
 from __future__ import annotations
 
-import os
+import uuid
 from pathlib import Path
 
-from vvs.config import Settings
+import numpy as np
+
 from vvs.media.probe import has_audio_stream
 from vvs.retrieve.index import should_run_asr
-from vvs.retrieve.qdrant_store import QdrantStore
-from vvs.retrieve.store import shard_key
+from vvs.retrieve.opensearch_store import OpenSearchStore, ping
+from vvs.retrieve.store import VectorPayload
 
 
-def test_shard_key_is_stable() -> None:
-    assert shard_key("asset-a", 8) == shard_key("asset-a", 8)
-    assert 0 <= shard_key("asset-a", 8) < 8
+def _skip_without_opensearch() -> bool:
+    if ping():
+        return False
+    print("[test_vector_store] OpenSearch unreachable; run `docker compose up -d`. Skipping.")
+    return True
 
 
-def test_qdrant_requires_url() -> None:
-    try:
-        QdrantStore(
-            "demo",
-            "visual",
-            settings=Settings(vector_backend="qdrant", qdrant_url=None),
-        )
-    except SystemExit as exc:
-        assert "VVS_QDRANT_URL" in str(exc)
-        return
-    raise AssertionError("expected SystemExit")
+def _fresh_index() -> str:
+    return f"vvs_test_{uuid.uuid4().hex[:8]}"
+
+
+def _drop_index(index: str) -> None:
+    from opensearchpy import OpenSearch
+
+    OpenSearch(hosts=["http://localhost:9200"]).indices.delete(index=index, ignore=[404])
 
 
 def test_force_mute_skips_asr() -> None:
@@ -39,103 +49,138 @@ def test_force_mute_skips_asr() -> None:
     assert should_run_asr(video, force_mute=False) is True
 
 
-def test_faiss_is_single_threaded_on_macos_only() -> None:
-    """A FAISS OpenMP region on a worker thread segfaults when two libomp load.
-
-    macOS is where faiss-cpu and torch each bring their own libomp, so it is the
-    only platform that needs the parallelism turned off. Linux keeps the default.
-    """
-    import os
-    import sys
-    from unittest import mock
-
-    from vvs.retrieve.faiss_store import faiss_thread_default
-
-    os.environ.pop("VVS_FAISS_THREADS", None)
-    with mock.patch.object(sys, "platform", "darwin"):
-        assert faiss_thread_default() == 1
-    with mock.patch.object(sys, "platform", "linux"):
-        assert faiss_thread_default() == 0
-
-
-def test_faiss_thread_override() -> None:
-    import os
-    import sys
-    from unittest import mock
-
-    from vvs.retrieve.faiss_store import faiss_thread_default
-
+def test_opensearch_roundtrip() -> None:
+    if _skip_without_opensearch():
+        return
+    index = _fresh_index()
+    vid = f"probe-{uuid.uuid4().hex[:8]}"
     try:
-        os.environ["VVS_FAISS_THREADS"] = "4"
-        with mock.patch.object(sys, "platform", "darwin"):
-            assert faiss_thread_default() == 4
-        os.environ["VVS_FAISS_THREADS"] = "0"  # 0 means "leave faiss alone"
-        with mock.patch.object(sys, "platform", "darwin"):
-            assert faiss_thread_default() == 0
-        for bogus in ("", "lots", "-2"):
-            os.environ["VVS_FAISS_THREADS"] = bogus
-            with mock.patch.object(sys, "platform", "darwin"):
-                assert faiss_thread_default() == 1, bogus
-    finally:
-        os.environ.pop("VVS_FAISS_THREADS", None)
-
-
-def test_every_faiss_call_site_goes_through_the_pinned_loader() -> None:
-    """A direct `import faiss` would skip the thread limit and reintroduce the crash."""
-    from pathlib import Path
-
-    src = Path(__file__).resolve().parents[1] / "src/vvs/retrieve/faiss_store.py"
-    lines = src.read_text().splitlines()
-    raw = [i for i, line in enumerate(lines, 1) if line.strip() == "import faiss"]
-    assert len(raw) == 1, f"expected only the loader to import faiss, found lines {raw}"
-    assert "def _faiss" in "\n".join(lines[max(0, raw[0] - 8) : raw[0]])
-
-
-def test_search_still_returns_hits_with_threads_pinned() -> None:
-    import importlib
-    import tempfile
-
-    import numpy as np
-
-    import vvs.paths
-    import vvs.retrieve.faiss_store as fs
-    from vvs.retrieve.faiss_store import FaissStore
-    from vvs.retrieve.store import VectorPayload
-
-    previous_root = os.environ.get("VVS_DATA_DIR")
-    with tempfile.TemporaryDirectory() as tmp:
-        os.environ["VVS_DATA_DIR"] = tmp
-        importlib.reload(vvs.paths)
-        # faiss_store captured video_dir at import, so it needs the new root too.
-        fs.video_dir = vvs.paths.video_dir
-        store = FaissStore("probe", "visual", index_type="hnsw")
+        store = OpenSearchStore(vid, "visual", index_override=index)
         store.create(8)
         vecs = np.eye(8, dtype=np.float32)
         store.add(
             vecs,
             [
                 VectorPayload(
-                    vector_id=i, modality="video_frame", path=f"f{i}.jpg", t_s=float(i)
+                    vector_id=i, asset_id=vid, modality="video_frame", path=f"f{i}.jpg", t_s=float(i)
                 )
                 for i in range(8)
             ],
         )
         hits = store.search(vecs[3], top_k=2)
-        assert hits, "single-threaded FAISS must still return hits"
+        assert hits, "OpenSearch k-NN search must return hits"
         assert hits[0].payload.t_s == 3.0
+        assert store.ntotal() == 8
         store.close()
+    finally:
+        _drop_index(index)
 
-    # Leave the data root as we found it; later tests read real indexes.
-    if previous_root is None:
-        os.environ.pop("VVS_DATA_DIR", None)
-    else:
-        os.environ["VVS_DATA_DIR"] = previous_root
-    importlib.reload(vvs.paths)
-    fs.video_dir = vvs.paths.video_dir
+
+def test_all_payloads_filters_by_video_and_modality() -> None:
+    if _skip_without_opensearch():
+        return
+    index = _fresh_index()
+    vid_a = f"probe-a-{uuid.uuid4().hex[:8]}"
+    vid_b = f"probe-b-{uuid.uuid4().hex[:8]}"
+    try:
+        store_a = OpenSearchStore(vid_a, "visual", index_override=index)
+        store_b = OpenSearchStore(vid_b, "visual", index_override=index)
+        store_a.create(4)
+        store_a.add(
+            np.eye(4, dtype=np.float32),
+            [
+                VectorPayload(vector_id=0, asset_id=vid_a, modality="video_frame", t_s=0.0),
+                VectorPayload(vector_id=1, asset_id=vid_a, modality="ocr", text="hi", t_s=1.0),
+                VectorPayload(vector_id=2, asset_id=vid_a, modality="video_frame", t_s=2.0),
+                VectorPayload(vector_id=3, asset_id=vid_a, modality="ocr", text="bye", t_s=3.0),
+            ],
+        )
+        store_b.create(4)
+        store_b.add(
+            np.eye(4, dtype=np.float32)[:1],
+            [VectorPayload(vector_id=0, asset_id=vid_b, modality="video_frame", t_s=9.0)],
+        )
+
+        all_a = store_a.all_payloads()
+        assert {p.t_s for p in all_a} == {0.0, 1.0, 2.0, 3.0}
+        ocr_a = store_a.all_payloads(modality="ocr")
+        assert {p.text for p in ocr_a} == {"hi", "bye"}
+        # vid_b's row must never leak into vid_a's payload list.
+        assert all(p.asset_id == vid_a for p in all_a)
+        store_a.close()
+        store_b.close()
+    finally:
+        _drop_index(index)
+
+
+def test_create_wipes_prior_rows_for_the_same_video_only() -> None:
+    """Rebuild semantics: create() truncates this video's rows, not the whole shared index."""
+    if _skip_without_opensearch():
+        return
+    index = _fresh_index()
+    vid_rebuilt = f"probe-rebuild-{uuid.uuid4().hex[:8]}"
+    vid_other = f"probe-other-{uuid.uuid4().hex[:8]}"
+    try:
+        rebuilt = OpenSearchStore(vid_rebuilt, "visual", index_override=index)
+        other = OpenSearchStore(vid_other, "visual", index_override=index)
+        rebuilt.create(4)
+        rebuilt.add(
+            np.eye(4, dtype=np.float32)[:2],
+            [
+                VectorPayload(vector_id=0, asset_id=vid_rebuilt, t_s=0.0),
+                VectorPayload(vector_id=1, asset_id=vid_rebuilt, t_s=1.0),
+            ],
+        )
+        other.create(4)
+        other.add(
+            np.eye(4, dtype=np.float32)[:1],
+            [VectorPayload(vector_id=0, asset_id=vid_other, t_s=5.0)],
+        )
+        assert rebuilt.ntotal() == 2
+        assert other.ntotal() == 1
+
+        # Re-analyze vid_rebuilt: create() again, then add fewer rows.
+        rebuilt.create(4)
+        assert rebuilt.ntotal() == 0, "create() must wipe this video's prior rows"
+        assert other.ntotal() == 1, "a sibling video's rows must survive another video's rebuild"
+        rebuilt.add(
+            np.eye(4, dtype=np.float32)[:1],
+            [VectorPayload(vector_id=0, asset_id=vid_rebuilt, t_s=2.0)],
+        )
+        assert rebuilt.ntotal() == 1
+        rebuilt.close()
+        other.close()
+    finally:
+        _drop_index(index)
+
+
+def test_dim_mismatch_across_videos_is_rejected() -> None:
+    """One shared index has one fixed vector width; a later, different-dim video must fail loudly."""
+    if _skip_without_opensearch():
+        return
+    index = _fresh_index()
+    vid_first = f"probe-dim-a-{uuid.uuid4().hex[:8]}"
+    vid_second = f"probe-dim-b-{uuid.uuid4().hex[:8]}"
+    try:
+        first = OpenSearchStore(vid_first, "visual", index_override=index)
+        first.create(6)
+        first.add(
+            np.eye(6, dtype=np.float32)[:1], [VectorPayload(vector_id=0, asset_id=vid_first, t_s=0.0)]
+        )
+        second = OpenSearchStore(vid_second, "visual", index_override=index)
+        try:
+            second.create(3)
+        except SystemExit as exc:
+            assert "6-d" in str(exc) and "3-d" in str(exc)
+        else:
+            raise AssertionError("expected SystemExit on a conflicting vector width")
+        first.close()
+    finally:
+        _drop_index(index)
 
 
 if __name__ == "__main__":
-    test_shard_key_is_stable()
-    test_qdrant_requires_url()
-    test_force_mute_skips_asr()
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
     print("ok")

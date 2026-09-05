@@ -4,7 +4,7 @@ CPU-only prototype: analyze one or more YouTube URLs or local files, then ask by
 
 The source is never hardcoded. The app starts empty unless `data/` already has indexes — then Search is unlocked and one query covers every title.
 
-This is a visual-first retrieval demo shaped like a production video search system. Each video keeps its own on-disk FAISS store (Qdrant-shaped for later). A query fans out across those stores and merges; it does not require one shared index. Mute video is first-class — Whisper runs only when an audio track exists.
+This is a visual-first retrieval demo shaped like a production video search system: every video's vectors live in the same two OpenSearch indexes (`vvs_visual`, `vvs_text`), not a file per video — see [`docs/CONFLUENCE_ONPREM.md`](docs/CONFLUENCE_ONPREM.md) for the sharded-cluster shape this scales to. Mute video is first-class — Whisper runs only when an audio track exists.
 
 ## Workflow
 
@@ -13,12 +13,12 @@ Two loops: **analyze once**, then **ask many times**.
 ```text
 1. Pick a video (URL, path, or upload)
 2. Optional (check both): Group shots (TransNetV2) and Describe scenes (X-Ray captions)
-3. Analyze video  →  stills + FAISS + SQLite + meta.json  (repeat for more titles)
+3. Analyze video  →  stills + OpenSearch rows + meta.json  (repeat for more titles)
 4. Type a question (mic = your voice, not the video)
 5. One query searches every indexed video · play top-3 clips labeled by title
 ```
 
-Analyze is the expensive pass (download, decode, optional VLM). Search is local ANN + payload lookup. Existing `data/<id>/visual.faiss` is **reused** on Analyze. **Re-analyze** rebuilds from scratch.
+Analyze is the expensive pass (download, decode, optional VLM). Search is a k-NN query against OpenSearch. An existing video's rows are **reused** on Analyze. **Re-analyze** rebuilds from scratch.
 
 ### Mute video vs talking-head
 
@@ -39,22 +39,22 @@ source → video.mp4
       → optional TransNetV2 shots → 1 still / shot (+ 8s floor in long takes)
       → else keyframes (2 fps + dHash + 4s floor)
       → L1 motion + luma flash on the same decode (force-keep lightning)
-      → Qwen3-VL-Embedding-2B → visual.faiss + visual.sqlite
-      → RapidOCR       → BGE-small   → text.faiss  + text.sqlite
+      → Qwen3-VL-Embedding-2B → vvs_visual (video_id-tagged rows in the shared index)
+      → RapidOCR       → BGE-small   → vvs_text (video_id-tagged rows in the shared index)
       → Whisper ASR    → BGE-small   ↗   (only if the file has audio)
       → scene cluster + Qwen3-VL-2B-Instruct captions → BGE ↗   (opt-in X-Ray)
 
 query  → Qwen-VL text + BGE query
-      → ANN each video's stores (mmap, top-k only) — fan-out, not one shared FAISS file
+      → k-NN each collection, filtered to this video's rows (or every video for an archive search)
       → lexical boost when a rare query word appears in transcript / OCR / caption
       → reciprocal rank fusion onto a still (per video; UI confidence)
       → merge across videos by absolute ANN scores (visual + caption + transcript + OCR)
       → motion / flash hybrid boost when the query asks for movement or a strike
-      → hydrate SQLite payload (asset_id, path, timestamp, shot_id, motion, quote)
+      → hydrate payload (asset_id, path, timestamp, shot_id, motion, quote) from the same OpenSearch row
       → play clip from that video + original still + confidence
 ```
 
-**Why two indexes.** Qwen-VL (2048-d for the 2B model) and BGE (384-d) are different embedding spaces. Visual frames and text are never mixed in one FAISS file.
+**Why two indexes.** Qwen-VL (2048-d for the 2B model) and BGE (384-d) are different embedding spaces, and OpenSearch's `knn_vector` field has one fixed width per index — visual frames and text are never mixed in one collection. Both collections are shared across the whole archive, distinguished by a `video_id` field on every row, not one file per video. See [`retrieve/opensearch_store.py`](src/vvs/retrieve/opensearch_store.py) for why (and its one real limitation: a shared index can't mix visual encoders of different widths).
 
 **Visual encoder.** Default is `Qwen/Qwen3-VL-Embedding-2B` (shared image/text space, 2048-d). Official VL embedding sizes are **2B** and **8B** only — there is no Qwen-VL-Embedding-4B (`Qwen3-Embedding-4B` is text-only). `VVS_VISUAL_MODEL=qwen-vl-emb-4B` aliases to the 2B VL model and logs that. CLIP ViT-B-32 remains available via `VVS_VISUAL_ENCODER=clip` so existing 512-d indexes still search. Switching encoder requires **Re-analyze**.
 
@@ -102,12 +102,17 @@ crash rather than a Python error — the message is the resource tracker's parti
 note, not the cause. Set `VVS_DEVICE=cpu` to confirm the GPU is implicated, then
 `VVS_VISUAL_DTYPE=float32` to test whether it is specifically half precision.
 
-**Duplicate native libraries.** Two independent duplications bite this stack, and
-they are worth separating because only one of them is fatal.
+**Duplicate native libraries (historical — the fatal one is retired).** This
+stack used to carry `faiss-cpu` for on-disk ANN, and it collided with torch on
+macOS in a way worth recording even though the dependency is gone: FAISS
+search now runs server-side in OpenSearch (`retrieve/opensearch_store.py`),
+not as an in-process library, so there is no second copy of anything for
+torch to collide with. Left here because the *mechanism* that fixed it
+(`vvs/compute.py`) is still load-bearing for an unrelated crash — see below.
 
-*OpenMP (fatal, fixed).* `faiss-cpu` and `torch` each bundle their own LLVM
-OpenMP runtime — on macOS arm64, `faiss/.dylibs/libomp.dylib` and
-`torch/lib/libomp.dylib`. Two consequences, and both had to be handled:
+*OpenMP (fatal, retired with FAISS).* `faiss-cpu` and `torch` each bundled
+their own LLVM OpenMP runtime — on macOS arm64, `faiss/.dylibs/libomp.dylib`
+and `torch/lib/libomp.dylib`. Two consequences, and both had to be handled:
 
 1. Whichever runtime initializes second makes OpenMP abort the process.
    `vvs/__init__.py` sets `KMP_DUPLICATE_LIB_OK=TRUE` before torch or faiss can
@@ -116,8 +121,8 @@ OpenMP runtime — on macOS arm64, `faiss/.dylibs/libomp.dylib` and
    (`__kmpc_fork_call` → `__kmp_join_barrier` → `__kmp_suspend_initialize_thread`)
    segfaults the moment it is entered from a **second distinct OS thread**, warm
    or not — confirmed by direct repro, not just inference from crash logs.
-   Pinning FAISS to one thread (`faiss_thread_default()` in
-   `retrieve/faiss_store.py`, `VVS_FAISS_THREADS` to override) does **not** avoid
+   Pinning FAISS to one thread (`faiss_thread_default()`, in the now-removed
+   `retrieve/faiss_store.py`) does **not** avoid
    this: `__kmpc_fork_call` still runs the full fork/join barrier machinery
    regardless of team size. Priming the runtime on the main thread first doesn't
    help either — the crash isn't main-vs-background, it's "first thread ever to
@@ -126,23 +131,18 @@ OpenMP runtime — on macOS arm64, `faiss/.dylibs/libomp.dylib` and
    same query from the CLI (a single process, one thread, done) was fine.
    `faulthandler` pinned it to `swigfaiss.search` called from `ui/app.py`.
 
-The real fix for (2) is `vvs/compute.py`: a single dedicated background thread
-that every torch/faiss/whisper call in the UI is funneled through via
-`compute.run(fn, *args, **kwargs)`, including the model warm-up itself (so the
-thread that loads the models is the same thread that ever touches faiss —
-warming on the main thread, as `launch()` used to, doesn't help, since the main
-thread is never the one serving requests). This guarantees exactly one thread
-touches the OpenMP runtime for the life of the process, regardless of which
-Gradio worker thread a request lands on. Verified against the live server with
-mixed sequential and concurrent `/from_text` requests. The one-thread FAISS pin
-is kept anyway as a cheap, harmless second line of defense; it costs nothing
-measurable on these per-video HNSW indexes of a few thousand vectors, where the
-ANN search is microseconds and query embedding dominates by orders of
-magnitude. Linux keeps FAISS's default thread count, since its manylinux wheels
-do not bring a second OpenMP runtime and the CLI never introduces a second
-thread either way.
+The fix for (2) was `vvs/compute.py`: a single dedicated background thread
+that every heavy call in the UI is funneled through via
+`compute.run(fn, *args, **kwargs)`. That module is still very much in use —
+it turned out transformers' parallel weight-loading path hits a *different*
+same-shape crash (a background-thread-only segfault) the first time a model
+loads, independent of FAISS. See the docstring in `vvs/compute.py` for that
+still-active bug. `KMP_DUPLICATE_LIB_OK=TRUE` is kept in `vvs/__init__.py` as
+a harmless defensive default (see its updated comment) even though FAISS no
+longer needs it, since onnxruntime (via rapidocr) is still a native library
+in this process.
 
-*Diagnosing a silent death.* A native crash in torch, faiss, onnxruntime or the
+*Diagnosing a silent death.* A native crash in torch, onnxruntime or the
 bundled FFmpeg kills the process with a signal, so Python raises nothing and the
 only evidence is `resource_tracker: There appear to be 1 leaked semaphore
 objects` at shutdown — which names neither the step nor the library. Two things
@@ -155,7 +155,6 @@ on screen is the step that died:
 uv run python scripts/diagnose_search.py "your query"
 VVS_DEVICE=cpu           uv run python scripts/diagnose_search.py   # rule out Metal
 VVS_VISUAL_DTYPE=float32 uv run python scripts/diagnose_search.py   # rule out fp16
-KMP_DUPLICATE_LIB_OK=""  uv run python scripts/diagnose_search.py   # expose OMP Error #15
 ```
 
 macOS also writes a full report per crash; the top frames name the guilty dylib:
@@ -166,7 +165,7 @@ ls -t ~/Library/Logs/DiagnosticReports/*.ips | head -1 | xargs head -60
 
 *Surviving a crash.* An abort can kill the process mid-write, and `meta.json`
 carries the transcript, scene captions and OCR text — none of which can be
-rebuilt from the FAISS stores, so losing it means re-captioning the whole video.
+rebuilt from the OpenSearch collections, so losing it means re-captioning the whole video.
 It is written atomically (temp file, `fsync`, `os.replace`) with the previous copy
 rotated to `meta.json.bak`, and readers fall back to that backup when the primary
 will not parse. This matters because a truncated `meta.json` is worse than a
@@ -203,7 +202,7 @@ re-embedding the 1,332-frame sample archive with WeMM is ~27 hours, so the
 ready to run there unchanged. Both models emit 2048-d L2-normalized vectors,
 which is exactly why `models.visual_encoder` has to be recorded per index.
 
-**Archive search.** Each video keeps its own `visual.faiss` (POC fan-out). A query embeds once, searches every store, then **merges by absolute ANN scores**:
+**Archive search.** Every video's rows live in the same `vvs_visual` index, filtered by `video_id`. A query embeds once, searches each video's rows in turn, then **merges by absolute ANN scores**:
 
 ```text
 corpus_relevance = max( visual + 1.15×caption + 0.55×OCR,
@@ -214,9 +213,9 @@ corpus_relevance = max( visual + 1.15×caption + 0.55×OCR,
 
 Picture path and spoken path **compete**, they are not summed. BGE-small cosine is ~0.65 even on unrelated talk, so adding transcript onto every interview made “trumpet” return the interview clip over Jennifer Connelly’s saxophone still. A real spoken hit (`robotics`, lexical-boosted ANN) still wins the max() against a random music-video picture. **Motion is a sidecar, not a VLM clip:** the encoder still sees one JPEG. Decode computes L1 / luma-jump on a 64×36 gray; lightning stills are force-kept. “Moving tornado” boosts high `motion_energy`; “lightning” boosts `flash_energy`; “tornado” does not. Old indexes default both scalars to 0 — **Re-analyze** to populate them. Per-video RRF **confidence** is only the UI badge. We do **not** keep-or-drop titles because a caption contains the query words. One strong title may take every slot. Pin one file with `vvs query --video-id ID`. Production is one visual collection + one text collection with `asset_id` in the payload — same ranker, no per-movie file walk.
 
-**FAISS + SQLite is not “SQLite does keywords.”** FAISS is the only ANN. SQLite is the payload sidecar (`vector_id` → path, `t_s`, `modality`, `text`, `shot_id`, `motion_energy`, `flash_energy`). Lexical ranking and the motion/flash boost run in Python on the ANN candidates only. There is no FTS5 / BM25 table. If FAISS never retrieved the row, those boosts never see it.
+**OpenSearch k-NN is the only ANN here, not BM25.** Every payload field (`path`, `t_s`, `modality`, `text`, `shot_id`, `motion_energy`, `flash_energy`) lives on the same document as its `knn_vector`, so there is no separate payload store to keep in sync. Lexical ranking and the motion/flash boost still run in Python on the ANN candidates only — OpenSearch's BM25 engine is available on these text fields but intentionally unused (see the `opensearch_store.py` module docstring for why: adopting it would fuse visual and text scores server-side, discarding the per-channel ranks the RRF fusion below depends on). If k-NN never retrieved the row, those boosts never see it.
 
-**Why FAISS here / Qdrant later.** The app talks only to a `VectorStore` (`create`, `add`, `search`, `close`). `FaissStore` mmaps `*.faiss` and reads payload from SQLite. `QdrantStore` uses the same interface. A production cluster would use auto-sharding (`shard_number ≈ nodes`) in a single DC; custom `hash(asset_id) % N` only when every query is already scoped to one asset. Set `VVS_VECTOR_BACKEND=qdrant` and `VVS_QDRANT_URL` when a cluster exists.
+**`VectorStore` and OpenSearch.** The app talks only to a `VectorStore` (`create`, `add`, `search`, `close`) — see `retrieve/store.py`. `OpenSearchStore` (`retrieve/opensearch_store.py`) is the only implementation: two shared indexes, `vvs_visual` and `vvs_text`, across the whole archive, each row tagged with `video_id`. `docker compose up -d` runs a single local node; `docs/CONFLUENCE_ONPREM.md` §6–8 covers the sharded-cluster version of the same document shape.
 
 **Hybrid ranking.** Dense ANN alone can prefer generic “corporate / strategy” talk over a paragraph that actually says “robotics”. After ANN, hits that contain rare query terms get a lexical IDF boost (`0.14 × idf`), then RRF (`k=60`):
 
@@ -236,11 +235,11 @@ That table is **inside one video**. The UI confidence badge is RRF / ceiling. Ar
 
 Captioning uses the same device and precision as the embedder (see **Device** above), which matters more here than anywhere else: captioning is autoregressive, so each scene costs up to `QWEN_MAX_TOKENS` sequential forward passes rather than the single pass an embedding needs. If a caption model fails to load on the GPU, the session pins itself to CPU exactly as the encoder does.
 
-**TransNetV2 shots.** Mute video does not need a visual vector every 2 fps. TransNetV2 finds hard cuts on 48×27 frames (PyAV, no ffmpeg CLI). Each shot keeps one still, plus another every `VVS_SHOT_MAX_GAP_S` (default 8 s) so a long take is not a single embedding. The same 48×27 stack yields `motion_energy` / `flash_energy`; luma spikes add extra stills so lightning is not dropped. `shot_id` is stored on the keyframe and in the FAISS payload for citations. Mute clips use the shot span, not ±2 s around a keyframe. If TransNetV2 fails, analyze falls back to the 2 fps path.
+**TransNetV2 shots.** Mute video does not need a visual vector every 2 fps. TransNetV2 finds hard cuts on 48×27 frames (PyAV, no ffmpeg CLI). Each shot keeps one still, plus another every `VVS_SHOT_MAX_GAP_S` (default 8 s) so a long take is not a single embedding. The same 48×27 stack yields `motion_energy` / `flash_energy`; luma spikes add extra stills so lightning is not dropped. `shot_id` is stored on the keyframe and in the OpenSearch payload for citations. Mute clips use the shot span, not ±2 s around a keyframe. If TransNetV2 fails, analyze falls back to the 2 fps path.
 
 TransNetV2 is **shot-boundary** detection (cuts / fades), not semantic “this is a concert.” Object crops (`segment_id`) are a later pass on these stills, not on every raw frame.
 
-**Later, on a larger server: N-frame VLM windows.** `Qwen3-VL-Embedding` already accepts video (`{"video": frames, "fps": 4, "max_frames": 8}`), not only a still. This laptop path does **not** call that — one JPEG per vector, plus the L1/luma sidecar. When a GPU or a bigger CPU box is available, encode a short window around each kept still (about 1 s, 6–8 frames) into the **same** 2048-d visual FAISS. Then `moving tornado` can match motion in the pixels. Do not embed the whole `video.mp4` as one vector (the playhead disappears). Lightning still needs the force-keep so the strike is inside the window. That pass is opt-in and needs **Re-analyze**; it is not on this CPU prototype.
+**Later, on a larger server: N-frame VLM windows.** `Qwen3-VL-Embedding` already accepts video (`{"video": frames, "fps": 4, "max_frames": 8}`), not only a still. This laptop path does **not** call that — one JPEG per vector, plus the L1/luma sidecar. When a GPU or a bigger CPU box is available, encode a short window around each kept still (about 1 s, 6–8 frames) into the **same** 2048-d `vvs_visual` index. Then `moving tornado` can match motion in the pixels. Do not embed the whole `video.mp4` as one vector (the playhead disappears). Lightning still needs the force-keep so the strike is inside the window. That pass is opt-in and needs **Re-analyze**; it is not on this CPU prototype.
 
 ## How to run
 
@@ -249,11 +248,10 @@ TransNetV2 is **shot-boundary** detection (cuts / fades), not semantic “this i
 ```bash
 cd video-voice-search
 uv sync
-# optional Qdrant client:
-# uv sync --extra qdrant
+docker compose up -d   # starts a local single-node OpenSearch on :9200
 ```
 
-Needs Python 3.12+, `uv`, ~8 GB RAM (Qwen-VL embedding 2B is heavier than CLIP; Instruct captioning loads a second 2B VL). First run needs network for Qwen-VL Embedding / BGE / RapidOCR, plus Whisper (if audio), TransNetV2, and Qwen3-VL-Instruct (or BLIP) if captions are on. After that, query is offline. CLIP indexes built before this swap still search; new analyzes use Qwen-VL.
+Needs Python 3.12+, `uv`, Docker, ~8 GB RAM (Qwen-VL embedding 2B is heavier than CLIP; Instruct captioning loads a second 2B VL). First run needs network for Qwen-VL Embedding / BGE / RapidOCR, plus Whisper (if audio), TransNetV2, and Qwen3-VL-Instruct (or BLIP) if captions are on. After that, query is offline (OpenSearch itself needs no network once its image is pulled). CLIP indexes built before the Qwen-VL swap still search; new analyzes use Qwen-VL. `VVS_OPENSEARCH_URL` points at a different instance if you're not running the bundled compose file.
 
 ### Live demo UI
 
@@ -360,7 +358,7 @@ uv run vvs list
 
 ## Compare embeddings: TransNetV2 vs 2 fps
 
-**Visual embeddings = number of stills the visual encoder wrote** (`len(meta.frames)`, same as `visual.faiss` ntotal). That is the TransNetV2 vs 2 fps number. Text vectors (OCR / captions / ASR) are a separate count.
+**Visual embeddings = number of stills the visual encoder wrote** (`len(meta.frames)`, same as this video's row count in `vvs_visual`). That is the TransNetV2 vs 2 fps number. Text vectors (OCR / captions / ASR) are a separate count.
 
 Index the **same file twice** under two ids so they do not overwrite each other:
 
@@ -415,13 +413,11 @@ Outputs in `data/<video_id>/`:
 | `frames/` | Representative JPEGs (2 fps set, or TransNet stills) |
 | `clips/` | On-demand H.264 hits |
 | `preview.mp4` | Cached 6 s library preview (silent, 480px). Outside `clips/` on purpose — `attach_clips` prunes foreign names there |
-| `visual.faiss` / `visual.sqlite` | Qwen-VL ANN + payload (`asset_id`, `shot_id`, path, `t_s`, `motion_energy`, `flash_energy`) |
-| `text.faiss` / `text.sqlite` | BGE ANN + payload (OCR / transcript / scene) |
 | `meta.json` | Title, duration, frames, shots, transcript, OCR, scene cards, channels |
 | `meta.json.bak` | Previous `meta.json`, rotated on every write. Read only when the primary will not parse |
 | `timings.json` | Stage seconds |
 
-`index.npz` is migrate-only leftover. Query does not load it.
+The vectors and their payload (`asset_id`, `shot_id`, path, `t_s`, `text`, `motion_energy`, `flash_energy`) are **not** under `data/`: they live in OpenSearch, in the shared `vvs_visual` (Qwen-VL) and `vvs_text` (BGE: OCR / transcript / scene) indexes, one row per video per still or text observation, filtered by `video_id`. Deleting `data/<video_id>/` alone leaves those rows behind — use `vvs`'s delete flow (UI **Delete**, or `delete_index()`), which purges both.
 
 ## Package layout
 
@@ -430,7 +426,7 @@ src/vvs/
   cli.py config.py models.py paths.py
   ingest/     YouTube + local ingest
   media/      frames, shots (TransNetV2), motion/flash, clips, transcribe, ocr, scenes, caption
-  retrieve/   embed, index, search, reembed, VectorStore (FAISS / Qdrant)
+  retrieve/   embed, index, search, reembed, VectorStore (OpenSearch)
   ui/         Gradio + custom theme + library grid
 tests/        store / mute / shots / scenes / corpus / motion / library (no VLM download)
 ```
@@ -444,10 +440,8 @@ Commands: `uv run vvs index|query|app|warm|list`.
 | `VVS_SOURCE` / `VVS_VIDEO_ID` | Optional CLI / UI prefill |
 | `VVS_DATA_DIR` | Index root (default `data/`) |
 | `VVS_HOST` / `VVS_PORT` | Gradio bind (default `0.0.0.0:7860`) |
-| `VVS_VECTOR_BACKEND` | `faiss` (default) or `qdrant` |
-| `VVS_FAISS_INDEX_TYPE` | `hnsw` (small N) or `ivf_pq` |
-| `VVS_QDRANT_URL` / `VVS_QDRANT_API_KEY` | Required if backend is `qdrant` |
-| `VVS_QDRANT_SHARDS` | Prod shard count for `hash(asset_id) % N` (default 8) |
+| `VVS_OPENSEARCH_URL` | OpenSearch endpoint (default `http://localhost:9200`; `docker compose up -d` starts one) |
+| `VVS_OPENSEARCH_TIMEOUT_S` | Client request timeout (default `10`) |
 | `VVS_FORCE_MUTE` | Skip Whisper even if the file has audio |
 | `VVS_SCENE_CAPTION` | Caption visual scenes at analyze (X-Ray metadata) |
 | `VVS_SCENE_CAPTION_MODEL` | `qwen_vl` (default, Qwen3-VL-2B-Instruct) or `blip` |
@@ -460,7 +454,6 @@ Commands: `uv run vvs index|query|app|warm|list`.
 | `VVS_DEVICE` | `mps`, `cuda`, or `cpu`. Default auto-detects (mps → cuda → cpu) |
 | `VVS_VISUAL_DTYPE` | `float16`, `bfloat16`, `float32`. Default fp16 on GPU, fp32 on CPU |
 | `VVS_VISUAL_BATCH` | Frames per forward pass. Default 8 on GPU, 1 on CPU |
-| `VVS_FAISS_THREADS` | FAISS OpenMP threads. Default 1 on macOS (avoids the libomp segfault), 0 = FAISS default elsewhere |
 | `VVS_FAULTHANDLER` | `0` disables the C-level traceback on fatal signals |
 
 Search weights live in `retrieve/search.py` (not env): per-video RRF (`TEXT_WEIGHT` 1.6, `OCR_WEIGHT` 0.6, `SCENE_WEIGHT` 1.0) and archive merge (`SCENE_ANN_WEIGHT` 1.15, `TEXT_ANN_WEIGHT` 1.4, `OCR_ANN_WEIGHT` 0.55, `LEXICAL_BLEND` 0.2, `MOTION_BLEND` 0.45). Motion/flash keep thresholds are in `media/motion.py` (`FLASH_KEEP` 0.22, `MOTION_KEEP` 0.18).

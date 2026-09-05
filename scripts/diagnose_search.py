@@ -1,19 +1,24 @@
 #!/usr/bin/env python
 """Walk the search path one step at a time to find where a native crash happens.
 
-A crash inside torch, faiss or onnxruntime kills the process with a signal, so
-Python raises nothing and the only evidence is the resource tracker's "leaked
-semaphore objects" warning at shutdown. That warning names neither the step nor
-the library. This script prints each step before performing it and flushes
-immediately, so the last line on screen is the step that died.
+A crash inside torch, onnxruntime, or the OpenSearch client's native TLS stack
+kills the process with a signal (or hangs on a connection that never resolves),
+so Python raises nothing useful. This script prints each step before
+performing it and flushes immediately, so the last line on screen is the step
+that died or hung.
 
     uv run python scripts/diagnose_search.py "your query"
 
-Useful variations, to bisect device and library involvement:
+Useful variations, to bisect device involvement:
 
     VVS_DEVICE=cpu           uv run python scripts/diagnose_search.py   # rule out Metal
     VVS_VISUAL_DTYPE=float32 uv run python scripts/diagnose_search.py   # rule out fp16
-    KMP_DUPLICATE_LIB_OK=""  uv run python scripts/diagnose_search.py   # expose OMP Error #15
+
+The dual-OpenMP-runtime segfault this script originally targeted (faiss-cpu
+and torch each bundling their own libomp.dylib on macOS) no longer applies:
+OpenSearch's k-NN search runs server-side, in the OpenSearch JVM process, not
+in this Python process, so there is no second libomp to collide with torch's.
+See git history for the retired faiss-specific diagnostic steps.
 """
 
 from __future__ import annotations
@@ -53,12 +58,16 @@ def main() -> int:
     print(f"[diag]     torch {torch.__version__} mps={torch.backends.mps.is_available()}", flush=True)
     ok(t)
 
-    t = step("import faiss (second OpenMP runtime loads here)")
-    from vvs.retrieve.faiss_store import _faiss, faiss_thread_default
+    t = step("ping OpenSearch")
+    from vvs.config import load_settings
+    from vvs.retrieve.opensearch_store import ping
 
-    faiss = _faiss()
-    print(f"[diag]     faiss {faiss.__version__}", flush=True)
-    print(f"[diag]     faiss threads pinned to {faiss_thread_default()} (0 = faiss default)", flush=True)
+    settings = load_settings()
+    reachable = ping(settings)
+    print(f"[diag]     {settings.opensearch_url} reachable={reachable}", flush=True)
+    if not reachable:
+        print("[diag] OpenSearch unreachable; run `docker compose up -d`", flush=True)
+        return 1
     ok(t)
 
     t = step("resolve device")
@@ -103,7 +112,7 @@ def main() -> int:
         bundle = load_index(vid)
         ok(t)
 
-        t = step(f"FAISS search {vid} (OpenMP-parallel; prime crash suspect)")
+        t = step(f"OpenSearch k-NN search {vid}")
         from vvs.retrieve.search import search
 
         hits = search(vid, query, top_k=3, loaded=bundle)

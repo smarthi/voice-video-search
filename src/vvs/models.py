@@ -83,7 +83,7 @@ class ChannelFlags(BaseModel):
     ocr: bool = False
     asr: bool = False
     scene: bool = False
-    vector_backend: str = "faiss"
+    vector_backend: str = "opensearch"
 
 
 class ModelCard(BaseModel):
@@ -114,7 +114,7 @@ class IndexMeta(BaseModel):
     slide_heavy: bool = False
     channels: ChannelFlags = Field(default_factory=ChannelFlags)
     models: ModelCard
-    vector_backend: str = "faiss"
+    vector_backend: str = "opensearch"
 
     @model_validator(mode="after")
     def _legacy_asr_channel(self) -> IndexMeta:
