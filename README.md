@@ -182,6 +182,17 @@ for m in data/*/meta.json; do python -c "import json,sys;json.load(open(sys.argv
 Anything listed there predates the atomic write and needs **Re-analyze**, since
 there is no backup to recover from yet.
 
+*Surviving a crash mid-rebuild.* The same atomicity now extends to the OpenSearch
+rows, not just `meta.json`. Every `build_index()` call gets a fresh
+`index_generation` token; new rows are written tagged with it while the
+*previous* generation's rows stay fully intact and queryable throughout the
+rebuild. Only after every channel has been written and `meta.json` is atomically
+replaced with the new token do readers switch over — then the old generation's
+rows are garbage-collected. A crash mid-rebuild (or a search that lands mid-rebuild)
+sees the complete previous generation, never a half-written one. Indexes from
+before this existed have no token (`index_generation: null`) and are read as
+their own implicit "legacy" generation — no migration needed.
+
 *FFmpeg / AVFoundation (noisy, not fatal).* PyAV and OpenCV each bundle
 `libavdevice`, which on macOS registers the ObjC classes `AVFFrameReceiver` and
 `AVFAudioReceiver`. Two copies means two registrations, and the runtime says so at
@@ -217,6 +228,22 @@ Picture path and spoken path **compete**, they are not summed. BGE-small cosine 
 
 **`VectorStore` and OpenSearch.** The app talks only to a `VectorStore` (`create`, `add`, `search`, `close`) — see `retrieve/store.py`. `OpenSearchStore` (`retrieve/opensearch_store.py`) is the only implementation: two shared indexes, `vvs_visual` and `vvs_text`, across the whole archive, each row tagged with `video_id`. `docker compose up -d` runs a single local node; `docs/CONFLUENCE_ONPREM.md` §6–8 covers the sharded-cluster version of the same document shape.
 
+**Query expansion.** Qwen-VL's dual encoder is lexically brittle: “river” and
+“running water” can land in noticeably different places in embedding space
+despite meaning the same thing to a person. Before embedding, `expand_query_terms()`
+(`media/caption.py`) asks the already-loaded Qwen3-VL-2B-Instruct model — same
+bundle X-Ray captions use, a text-only prompt this time, no second model
+download — for `VVS_QUERY_EXPAND_VARIANTS` (default 2) alternate phrasings.
+The original query plus its expansions are embedded in one batched call and
+k-NN searched individually, then merged by **max score per candidate** — every
+list here is the same ANN space, so max is the right merge, unlike the
+BM25-vs-cosine case below. Shaped like `media/motion.py`'s `query_motion_flags`:
+a small, directly testable function called inline from `search()`, just backed
+by a model instead of a keyword set. Never blocks a search: a disabled setting,
+a missing/broken model, or an unusable generation all fall back to the literal
+query alone. `VVS_QUERY_EXPAND=0` disables it outright; `warm_models()` warms
+this model too when it is on, so a live search does not pay its load time.
+
 **Hybrid ranking.** Dense ANN alone can prefer generic “corporate / strategy” talk over a paragraph that actually says “robotics”. After ANN, hits that contain rare query terms get a lexical IDF boost (`0.14 × idf`), then RRF (`k=60`):
 
 | Channel | Weight | When |
@@ -235,7 +262,7 @@ That table is **inside one video**. The UI confidence badge is RRF / ceiling. Ar
 
 Captioning uses the same device and precision as the embedder (see **Device** above), which matters more here than anywhere else: captioning is autoregressive, so each scene costs up to `QWEN_MAX_TOKENS` sequential forward passes rather than the single pass an embedding needs. If a caption model fails to load on the GPU, the session pins itself to CPU exactly as the encoder does.
 
-**TransNetV2 shots.** Mute video does not need a visual vector every 2 fps. TransNetV2 finds hard cuts on 48×27 frames (PyAV, no ffmpeg CLI). Each shot keeps one still, plus another every `VVS_SHOT_MAX_GAP_S` (default 8 s) so a long take is not a single embedding. The same 48×27 stack yields `motion_energy` / `flash_energy`; luma spikes add extra stills so lightning is not dropped. `shot_id` is stored on the keyframe and in the OpenSearch payload for citations. Mute clips use the shot span, not ±2 s around a keyframe. If TransNetV2 fails, analyze falls back to the 2 fps path.
+**TransNetV2 shots.** Mute video does not need a visual vector every 2 fps. TransNetV2 finds hard cuts on 48×27 frames (PyAV, no ffmpeg CLI), decoded and scored in a bounded sliding window rather than held as one full-video RGB array — only timestamps, transition scores and the tiny motion samples grow with duration, not a per-frame image buffer, so a long video no longer costs memory proportional to its frame count. Each shot keeps one still, plus another every `VVS_SHOT_MAX_GAP_S` (default 8 s) so a long take is not a single embedding. The same decode yields `motion_energy` / `flash_energy` inline as it streams; luma spikes add extra stills so lightning is not dropped. `shot_id` is stored on the keyframe and in the OpenSearch payload for citations. Mute clips use the shot span, not ±2 s around a keyframe. If TransNetV2 fails, analyze falls back to the 2 fps path.
 
 TransNetV2 is **shot-boundary** detection (cuts / fades), not semantic “this is a concert.” Object crops (`segment_id`) are a later pass on these stills, not on every raw frame.
 
@@ -309,6 +336,13 @@ Talking-head (Whisper if there is audio, 2 fps keyframes):
 uv run vvs index --source 'https://www.youtube.com/watch?v=fBEGOk3ZHw4'
 uv run vvs index --source /path/to/talk.mp4 --video-id my-talk
 ```
+
+A local source's derived id is a slug of the filename plus a hash of its resolved
+path, not the filename alone — two different `demo.mp4` files in different
+folders no longer silently collide into one archive entry. An explicit
+`--video-id` (here, from a bulk manifest, or from `--dest-id`) is validated
+against `^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$` before it ever touches a filesystem
+path, so `--video-id '../../etc'` fails loudly instead of writing outside `data/`.
 
 Mute video (shots + no Whisper + optional captions):
 
@@ -445,6 +479,8 @@ Commands: `uv run vvs index|query|app|warm|list`.
 | `VVS_FORCE_MUTE` | Skip Whisper even if the file has audio |
 | `VVS_SCENE_CAPTION` | Caption visual scenes at analyze (X-Ray metadata) |
 | `VVS_SCENE_CAPTION_MODEL` | `qwen_vl` (default, Qwen3-VL-2B-Instruct) or `blip` |
+| `VVS_QUERY_EXPAND` | Query-time LLM phrasing expansion (default on); `0` disables it |
+| `VVS_QUERY_EXPAND_VARIANTS` | Alternate phrasings to generate per query (default `2`) |
 | `VVS_SHOT_DETECT` | TransNetV2 shot grouping; embed representatives only |
 | `VVS_SHOT_THRESHOLD` | Cut threshold (default `0.5`) |
 | `VVS_SHOT_MAX_GAP_S` | Extra still every N seconds inside a long shot (default `8`) |
