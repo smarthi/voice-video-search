@@ -169,6 +169,61 @@ def test_bm25_candidate_already_found_by_dense_keeps_its_dense_score() -> None:
     assert merged[0].score == 1.82
 
 
+def test_lexical_rerank_idf_boost_does_not_reward_a_bigger_video_more() -> None:
+    """Regression: "greenery" mentioned once in an 86-scene conference video
+    used to outscore "water"+"greenery" both genuinely, repeatedly present
+    in an 8-scene waterfall video -- idf computed against each video's own
+    corpus size, so the same word is worth wildly different amounts
+    depending on how many *other*, unrelated scenes that video happens to
+    have. Capping idf means the single incidental mention in the big corpus
+    can no longer out-boost the real, repeated match in the small one.
+    """
+    query = "clips of running water with greenery"
+    # Small, on-topic corpus (mirrors the real 8-doc waterfall video): both
+    # "water" and "greenery" genuinely recur.
+    small_corpus = [
+        "a waterfall in a green valley",
+        "water cascades over green rocks",
+        "a lush greenery covered hillside",
+        "another waterfall scene",
+        "water flowing through a garden",
+        "greenery and stone bridge",
+        "a river with water",
+        "final shot of the waterfall",
+    ]
+    waterfall_hit = StoreHit(
+        vector_id=0,
+        score=1.83,
+        payload=VectorPayload(
+            vector_id=0,
+            asset_id="waterfall",
+            modality="scene",
+            text="a waterfall in a green valley. Objects: waterfall, greenery",
+        ),
+    )
+    # Large, mostly-unrelated corpus (mirrors the real 86-doc conference
+    # video): "greenery" appears exactly once, by coincidence, in a scene
+    # that isn't really about water at all.
+    big_corpus = [f"scene about topic number {i}" for i in range(85)] + [
+        "a donkey under a roof with greenery in the background"
+    ]
+    donkey_hit = StoreHit(
+        vector_id=0,
+        score=1.72,
+        payload=VectorPayload(
+            vector_id=0,
+            asset_id="donkey",
+            modality="scene",
+            text="a donkey under a roof with greenery in the background",
+        ),
+    )
+    waterfall_reranked = search_module._lexical_rerank(
+        [waterfall_hit], query, small_corpus
+    )[0]
+    donkey_reranked = search_module._lexical_rerank([donkey_hit], query, big_corpus)[0]
+    assert waterfall_reranked.score > donkey_reranked.score
+
+
 def test_uniform_text_noise_does_not_outrank_a_real_visual_match() -> None:
     """Regression: a video whose text channels all sit near BGE's noise floor
     for every query (not a watermark -- real, distinct marketing copy that

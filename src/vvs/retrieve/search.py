@@ -32,6 +32,19 @@ MOTION_BLEND = 0.45
 MOTION_RRF_WEIGHT = 2.5
 ANN_OVERFETCH = 48
 LEXICAL_WEIGHT = 0.14
+# idf is computed against *this one video's* own scene/ocr/transcript text,
+# whose size ranges from ~8 documents (a short clip) to 80+ (a long
+# conference talk) archive-wide. A term that occurs exactly once gets a
+# much bigger idf in a big corpus (log((86+1)/2)+1 ~= 4.8) than in a small
+# one (log((8+1)/2)+1 ~= 2.5) purely from corpus size, not from being any
+# more genuinely distinctive -- so a single incidental mention of a query
+# word in a large, topically-unrelated video could outscore a real,
+# repeated match in a small, on-topic one ("greenery" mentioned once in an
+# 86-scene conference video outscored "water"+"greenery" both genuinely
+# repeated in an 8-scene waterfall video). Cap idf so single-mention noise
+# in a large corpus can't run away past what a real match in a small
+# corpus earns; legitimate matches measured so far top out around 2.1.
+LEXICAL_IDF_CAP = 2.2
 LEXICAL_CANDIDATE_SCORE = 0.30
 _STOP = frozenset(
     {
@@ -647,7 +660,10 @@ def _lexical_rerank(hits: list[StoreHit], query: str, documents: list[str]) -> l
     docs = [(doc or "").lower() for doc in documents if doc]
     n = max(1, len(docs))
     idf = {
-        term: math.log((n + 1) / (sum(1 for doc in docs if term in doc) + 1)) + 1.0
+        term: min(
+            LEXICAL_IDF_CAP,
+            math.log((n + 1) / (sum(1 for doc in docs if term in doc) + 1)) + 1.0,
+        )
         for term in terms
     }
     adjusted: list[StoreHit] = []
