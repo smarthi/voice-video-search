@@ -224,6 +224,120 @@ def test_lexical_rerank_idf_boost_does_not_reward_a_bigger_video_more() -> None:
     assert waterfall_reranked.score > donkey_reranked.score
 
 
+def test_search_uses_the_provided_lexical_corpus_not_the_local_one() -> None:
+    """Regression: a per-video-only corpus made ordinary words ("man",
+    "woman", "suit") look rare in a video that just doesn't happen to
+    describe people much, capped-idf-boosting an unrelated scene that
+    happened to share several such words over a caption genuinely about
+    the query. search_corpus() now builds one archive-wide corpus and
+    passes it through -- this checks search() actually uses it instead of
+    silently falling back to building its own local one.
+    """
+    frames = [Keyframe(index=0, t_s=1.0, path="f0.jpg", hash_hex="a")]
+    scenes = [
+        SceneCard(
+            scene_id=0,
+            start_s=1.0,
+            end_s=2.0,
+            frame_index=0,
+            path="f0.jpg",
+            caption="a common word appears here",
+        )
+    ]
+    meta = _fake_meta(frames=frames, scenes=scenes)
+    scene_hit = StoreHit(
+        vector_id=0,
+        score=1.7,
+        payload=VectorPayload(
+            vector_id=0, asset_id="fake", modality="scene", t_s=1.0, text="a common word appears here"
+        ),
+    )
+    bundle = {
+        "meta": meta,
+        "visual": _FakeVisualStore([]),
+        "text": _FakeTextStore(dense=[scene_hit], lexical=[]),
+    }
+    seen_corpora: list[list[str]] = []
+    original = search_module._lexical_rerank
+
+    def spy(hits, query, documents):
+        seen_corpora.append(list(documents))
+        return original(hits, query, documents)
+
+    real = search_module._lexical_rerank
+    search_module._lexical_rerank = spy
+    try:
+        search_module.search(
+            "fake",
+            "common word",
+            top_k=1,
+            loaded=bundle,
+            visual_queries=[np.zeros(1)],
+            text_query=np.zeros(1),
+            lexical_corpus=["an archive-wide document", "another one"],
+        )
+    finally:
+        search_module._lexical_rerank = real
+
+    assert seen_corpora == [["an archive-wide document", "another one"]]
+
+
+def test_search_corpus_builds_lexical_corpus_from_every_bundle() -> None:
+    """search_corpus() must hand every video's search() call the SAME
+    archive-wide corpus (all bundles' text combined), not each video's own
+    slice -- otherwise the idf-inflation bug is back per-video in
+    disguise.
+    """
+    meta_a = _fake_meta(
+        video_id="a",
+        scenes=[
+            SceneCard(scene_id=0, start_s=0.0, end_s=1.0, frame_index=0, path="a.jpg", caption="alpha scene text")
+        ],
+    )
+    meta_b = _fake_meta(
+        video_id="b",
+        scenes=[
+            SceneCard(scene_id=0, start_s=0.0, end_s=1.0, frame_index=0, path="b.jpg", caption="beta scene text")
+        ],
+    )
+    bundles = {
+        "a": {"meta": meta_a, "text": object()},
+        "b": {"meta": meta_b, "text": object()},
+    }
+    seen_corpora: list[list[str]] = []
+    real_search = search_module.search
+    orig_encoder_kind = search_module.encoder_kind
+    orig_visual_dim = search_module.visual_dim
+    orig_embed_clip_texts = search_module.embed_clip_texts
+    orig_embed_bge_query = search_module.embed_bge_query
+    orig_expand = search_module.expand_query_terms
+
+    def fake_search(vid, query, *, top_k, loaded, visual_queries, text_query, lexical_corpus=None):
+        seen_corpora.append(list(lexical_corpus or []))
+        return []
+
+    search_module.encoder_kind = lambda **_kw: "fake_encoder"
+    search_module.visual_dim = lambda **_kw: 8
+    search_module.embed_clip_texts = lambda *_a, **_kw: [[1.0]]
+    search_module.embed_bge_query = lambda *_a, **_kw: [[1.0]]
+    search_module.expand_query_terms = lambda *_a, **_kw: []
+    search_module.search = fake_search
+    try:
+        search_module.search_corpus("query", ["a", "b"], top_k=1, loaded=bundles)
+    finally:
+        search_module.encoder_kind = orig_encoder_kind
+        search_module.visual_dim = orig_visual_dim
+        search_module.embed_clip_texts = orig_embed_clip_texts
+        search_module.embed_bge_query = orig_embed_bge_query
+        search_module.expand_query_terms = orig_expand
+        search_module.search = real_search
+
+    assert len(seen_corpora) == 2
+    for corpus in seen_corpora:
+        assert "alpha scene text" in corpus
+        assert "beta scene text" in corpus
+
+
 def test_uniform_text_noise_does_not_outrank_a_real_visual_match() -> None:
     """Regression: a video whose text channels all sit near BGE's noise floor
     for every query (not a watermark -- real, distinct marketing copy that

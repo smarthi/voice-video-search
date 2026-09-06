@@ -98,6 +98,7 @@ def search(
     loaded: dict[str, Any] | None = None,
     visual_queries: list | None = None,
     text_query=None,
+    lexical_corpus: list[str] | None = None,
 ) -> list[Hit]:
     query = (query or "").strip()
     if not query:
@@ -126,7 +127,12 @@ def search(
     if bundle.get("text") is not None:
         bge_q = text_query if text_query is not None else embed_bge_query(query)[0]
         text_hits = bundle["text"].search(bge_q, top_k=max(ANN_OVERFETCH, top_k * 8))
-        corpus = (
+        # search_corpus() passes the whole archive's text here so idf reflects
+        # genuine rarity, not a coincidence of this one video's own document
+        # count -- see LEXICAL_IDF_CAP's docstring. A standalone search() call
+        # (no archive context) falls back to this video's own text, same as
+        # before.
+        corpus = lexical_corpus if lexical_corpus is not None else (
             [seg.text for seg in transcript]
             + [row.text for row in ocr_rows]
             + [scene.passage_text() for scene in scenes]
@@ -298,6 +304,24 @@ def search_corpus(
     # Expand once for the whole archive call, not once per encoder family --
     # it's a rewrite of the query text, independent of which model embeds it.
     texts = _query_texts(query)
+    # _lexical_rerank's idf needs to be measured against the whole archive,
+    # not each video's own handful of documents -- a per-video corpus made
+    # ordinary words ("man", "woman", "suit") look rare in a video that just
+    # doesn't happen to describe people much, capped-idf-boosting an
+    # unrelated courtroom scene above a caption genuinely about the query.
+    # Measured archive-wide, common words correctly get low idf regardless
+    # of which video they turn up in, while genuinely rare, specific words
+    # (a name, a compound description) still earn the cap. This dict is
+    # already-loaded metadata, no extra model calls -- just string lists.
+    lexical_corpus = [
+        text
+        for bundle in bundles.values()
+        for text in (
+            [seg.text for seg in getattr(bundle["meta"], "transcript", [])]
+            + [row.text for row in getattr(bundle["meta"], "ocr", [])]
+            + [scene.passage_text() for scene in getattr(bundle["meta"], "scenes", [])]
+        )
+    ]
     visual_queries: dict[tuple[str, str, int], list] = {}
     groups: list[list[Hit]] = []
     for vid, bundle in bundles.items():
@@ -314,6 +338,7 @@ def search_corpus(
                     loaded=bundle,
                     visual_queries=visual_queries[key],
                     text_query=text_q,
+                    lexical_corpus=lexical_corpus,
                 )
             )
         except Exception as exc:
