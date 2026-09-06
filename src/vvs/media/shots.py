@@ -13,7 +13,7 @@ import numpy as np
 from PIL import Image
 
 from vvs.media.frames import dhash64, _save_jpeg
-from vvs.media.motion import energies_from_rgb_stack, energy_at, flash_peak_times
+from vvs.media.motion import energy_at, flash_peak_times
 from vvs.models import Keyframe, MotionSample, ShotSpan
 from vvs.paths import frames_dir
 
@@ -142,19 +142,79 @@ def detect_shots(
     duration_s: float = 0.0,
 ) -> tuple[list[ShotSpan], list[MotionSample]]:
     """Run TransNetV2 on 48×27 RGB frames decoded with PyAV (no ffmpeg CLI)."""
-    frames, times = decode_transnet_frames(video_file)
-    if frames.shape[0] == 0:
+    preds, times, track = predict_shot_scores_stream(video_file)
+    if preds.size == 0:
         raise RuntimeError(f"No frames decoded from {video_file}")
-    preds = predict_shot_scores(frames)
     scenes = predictions_to_scenes(preds, threshold=threshold)
     shots = scenes_to_shots(scenes, times, duration_s=duration_s or float(times[-1]))
-    track = energies_from_rgb_stack(frames, times)
     flashes = flash_peak_times(track)
     print(
-        f"[shots] TransNetV2 {len(shots)} shots from {frames.shape[0]} frames @ 48x27"
+        f"[shots] TransNetV2 {len(shots)} shots from {len(times)} frames @ 48x27"
         f"{f', flash peaks {len(flashes)}' if flashes else ''}"
     )
     return shots, track
+
+
+def predict_shot_scores_stream(video_file: Path) -> tuple[np.ndarray, np.ndarray, list[MotionSample]]:
+    """Decode and infer in a bounded 100-frame window, never retaining video RGB.
+
+    Only timestamps, transition scores, and tiny motion samples grow with
+    duration. The previous implementation held every 48×27 RGB frame before
+    inference, which needlessly made long videos memory-bound.
+    """
+    import av
+    import torch
+
+    container = av.open(str(video_file))
+    stream = container.streams.video[0]
+    stream.thread_type = "AUTO"
+    rate = float(stream.average_rate) if stream.average_rate else 0.0
+    model = _transnet()
+    buffer: list[np.ndarray] = []
+    times: list[float] = []
+    track: list[MotionSample] = []
+    preds: list[np.ndarray] = []
+    first: np.ndarray | None = None
+    last: np.ndarray | None = None
+    previous: np.ndarray | None = None
+    idx = 0
+
+    def infer_ready() -> None:
+        while len(buffer) >= WINDOW:
+            window = np.stack(buffer[:WINDOW], axis=0)
+            with torch.no_grad():
+                single, _many = model(torch.from_numpy(window).unsqueeze(0))
+                preds.append(torch.sigmoid(single)[0, CONTEXT : CONTEXT + STRIDE, 0].cpu().numpy())
+            del buffer[:STRIDE]
+
+    try:
+        for frame in container.decode(stream):
+            t = float(frame.time if frame.time is not None else (idx / rate if rate else 0.0))
+            rgb = frame.to_ndarray(format="rgb24")
+            small = np.asarray(Image.fromarray(rgb).resize((TRANSNET_W, TRANSNET_H), Image.Resampling.BILINEAR), dtype=np.uint8)
+            if first is None:
+                first = small
+                buffer.extend([small] * CONTEXT)
+            last = small
+            times.append(t)
+            gray = np.asarray(Image.fromarray(small).convert("L").resize((64, 36), Image.Resampling.BILINEAR), dtype=np.uint8)
+            motion, flash = (0.0, 0.0) if previous is None else (float(np.mean(np.abs(gray.astype(np.float32) - previous.astype(np.float32))) / 255.0), float(abs(float(gray.mean()) - float(previous.mean())) / 255.0))
+            track.append(MotionSample(t_s=round(t, 3), motion_energy=round(min(1.0, motion), 4), flash_energy=round(min(1.0, flash), 4)))
+            previous = gray
+            buffer.append(small)
+            infer_ready()
+            idx += 1
+            if idx % 500 == 0:
+                print(f"[shots] decoded {idx} frames for TransNetV2")
+    finally:
+        container.close()
+    if not times or first is None or last is None:
+        return np.zeros((0,), dtype=np.float32), np.zeros((0,), dtype=np.float64), []
+    pad_end = CONTEXT + STRIDE - (len(times) % STRIDE if len(times) % STRIDE else STRIDE)
+    buffer.extend([last] * pad_end)
+    infer_ready()
+    scores = np.concatenate(preds)[: len(times)] if preds else np.zeros((len(times),), dtype=np.float32)
+    return scores.astype(np.float32), np.asarray(times, dtype=np.float64), track
 
 
 def extract_shot_keyframes(
@@ -227,37 +287,6 @@ def extract_shot_keyframes(
         raise RuntimeError(f"No shot keyframes extracted from {video_file}")
     print(f"[shots] kept {len(kept)} representatives from {len(shots)} shots (gap {max_gap_s:.1f}s)")
     return kept
-
-
-def decode_transnet_frames(video_file: Path) -> tuple[np.ndarray, np.ndarray]:
-    """Every decoded frame, resized to TransNet's 27×48 RGB. Timestamps in seconds."""
-    import av
-
-    container = av.open(str(video_file))
-    stream = container.streams.video[0]
-    stream.thread_type = "AUTO"
-    rate = float(stream.average_rate) if stream.average_rate else 0.0
-    images: list[np.ndarray] = []
-    times: list[float] = []
-    idx = 0
-    for frame in container.decode(stream):
-        t = frame.time
-        if t is None:
-            t = (idx / rate) if rate > 0 else 0.0
-        rgb = frame.to_ndarray(format="rgb24")
-        small = np.asarray(
-            Image.fromarray(rgb).resize((TRANSNET_W, TRANSNET_H), Image.Resampling.BILINEAR),
-            dtype=np.uint8,
-        )
-        images.append(small)
-        times.append(float(t))
-        idx += 1
-        if idx % 500 == 0:
-            print(f"[shots] decoded {idx} frames for TransNetV2")
-    container.close()
-    if not images:
-        return np.zeros((0, TRANSNET_H, TRANSNET_W, 3), dtype=np.uint8), np.zeros((0,), dtype=np.float64)
-    return np.stack(images, axis=0), np.asarray(times, dtype=np.float64)
 
 
 def predict_shot_scores(frames: np.ndarray) -> np.ndarray:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import vvs.retrieve.bulk as bulk
+from vvs.ingest import extract_video_id, validate_video_id
 
 
 def test_parse_sources_skips_blank_and_comment_lines() -> None:
@@ -72,6 +73,31 @@ def test_on_item_start_reports_progress() -> None:
         on_item_start=lambda i, total, source: monkeypatch_calls.append((i, total, source)),
     )
     assert monkeypatch_calls == [(1, 1, "#comment ignored by callers, not by bulk_index")]
+
+
+def test_local_ids_do_not_collide_on_filename_alone() -> None:
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        left = root / "left" / "demo.mp4"
+        right = root / "right" / "demo.mp4"
+        left.parent.mkdir()
+        right.parent.mkdir()
+        left.touch()
+        right.touch()
+        assert extract_video_id(str(left)) != extract_video_id(str(right))
+
+
+def test_video_id_rejects_paths_and_accepts_opaque_ids() -> None:
+    assert validate_video_id("video_01-a") == "video_01-a"
+    for hostile in ("../../etc", "a/b", "/tmp/video", "", "has space"):
+        try:
+            validate_video_id(hostile)
+        except ValueError:
+            continue
+        raise AssertionError(f"{hostile!r} was accepted")
 
 
 if __name__ == "__main__":

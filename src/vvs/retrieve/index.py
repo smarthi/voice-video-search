@@ -6,11 +6,12 @@ from collections.abc import Callable
 from pathlib import Path
 from time import perf_counter
 from typing import Any
+from uuid import uuid4
 
 import numpy as np
 
 from vvs.config import load_settings
-from vvs.ingest import extract_video_id, ingest
+from vvs.ingest import extract_video_id, ingest, validate_video_id
 from vvs.media.caption import caption_scenes
 from vvs.media.frames import extract_keyframes
 from vvs.media.ocr import is_slide_heavy, ocr_frames
@@ -43,7 +44,7 @@ from vvs.retrieve.embed import (
     visual_dim,
     visual_model_label,
 )
-from vvs.retrieve.opensearch_store import delete_video
+from vvs.retrieve.opensearch_store import delete_other_generations, delete_video
 from vvs.retrieve.store import VectorPayload, open_store, visual_store_exists
 
 StageCallback = Callable[[str], None]
@@ -82,6 +83,9 @@ def build_index(
             on_stage(stage)
 
     settings = load_settings()
+    # A rebuild stays unpublished until every vector channel is present and
+    # this metadata file is atomically replaced.
+    generation = f"g{uuid4().hex}"
     want_scenes = settings.scene_caption if scene_caption is None else bool(scene_caption)
     want_shots = settings.shot_detect if shot_detect is None else bool(shot_detect)
     timings = StageTimings()
@@ -203,6 +207,7 @@ def build_index(
     vdim = int(frame_vecs.shape[1]) if frame_vecs.size else visual_dim(settings=settings)
     _write_stores(
         vid,
+        generation=generation,
         settings=settings,
         frames=frames,
         frame_vecs=frame_vecs,
@@ -245,8 +250,15 @@ def build_index(
             visual_dim=vdim,
             visual_encoder=encoder_kind(settings=settings),
         ),
+        index_generation=generation,
     )
     write_json_atomic(meta_path(vid), meta.model_dump_json(indent=2))
+    try:
+        delete_other_generations(vid, generation, settings=settings)
+    except Exception as exc:
+        # Publishing succeeded; deferred cleanup cannot make the new index
+        # visible incorrectly, so leave it for a later rebuild.
+        print(f"[index] old-generation cleanup deferred: {exc}")
     timings.total_s = perf_counter() - started
     write_json_atomic(timings_path(vid), timings.model_dump_json(indent=2))
     print(f"[index] wrote OpenSearch collections and {meta_path(vid)}")
@@ -293,7 +305,12 @@ def load_index(video_id: str) -> dict[str, Any]:
     meta = IndexMeta.model_validate_json(read_json_text(meta_path(video_id)))
     settings = load_settings()
     visual = open_store(
-        video_id, "visual", dim=visual_dim(meta=meta), settings=settings, create=False
+        video_id,
+        "visual",
+        dim=visual_dim(meta=meta),
+        settings=settings,
+        create=False,
+        generation=meta.index_generation,
     )
     # Store dim is source of truth (meta can lag after a crashed Qwen write).
     if getattr(visual, "dim", 0) and meta.models.visual_dim != visual.dim:
@@ -311,7 +328,14 @@ def load_index(video_id: str) -> dict[str, Any]:
         write_json_atomic(meta_path(video_id), meta.model_dump_json(indent=2))
         print(f"[index] healed {video_id} meta visual_dim={visual.dim}")
     text = None
-    text_probe = open_store(video_id, "text", dim=384, settings=settings, create=False)
+    text_probe = open_store(
+        video_id,
+        "text",
+        dim=384,
+        settings=settings,
+        create=False,
+        generation=meta.index_generation,
+    )
     if text_probe.ntotal() > 0:
         text = text_probe
     return {
@@ -325,6 +349,7 @@ def load_index(video_id: str) -> dict[str, Any]:
 def _write_stores(
     vid: str,
     *,
+    generation: str,
     settings,
     frames,
     frame_vecs: np.ndarray,
@@ -336,7 +361,9 @@ def _write_stores(
     scene_vecs: np.ndarray | None = None,
 ) -> None:
     vdim = int(frame_vecs.shape[1]) if frame_vecs.size else visual_dim(settings=settings)
-    visual = open_store(vid, "visual", dim=vdim, settings=settings, create=True)
+    visual = open_store(
+        vid, "visual", dim=vdim, settings=settings, create=True, generation=generation
+    )
     try:
         visual.add(
             frame_vecs,
@@ -404,7 +431,9 @@ def _write_stores(
             text_rows.append(vec)
     if not text_payloads:
         return
-    text = open_store(vid, "text", dim=384, settings=settings, create=True)
+    text = open_store(
+        vid, "text", dim=384, settings=settings, create=True, generation=generation
+    )
     try:
         text.add(np.vstack(text_rows), text_payloads)
     finally:
@@ -413,7 +442,10 @@ def _write_stores(
 
 def resolve_video_id(source: str | None, video_id: str | None) -> str:
     if video_id:
-        return video_id
+        try:
+            return validate_video_id(video_id)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
     if source:
         return extract_video_id(source)
     raise SystemExit("Pass --video-id, --source, or set VVS_VIDEO_ID / VVS_SOURCE.")
@@ -422,7 +454,11 @@ def resolve_video_id(source: str | None, video_id: str | None) -> str:
 def index_exists(video_id: str) -> bool:
     if not meta_path(video_id).exists():
         return False
-    return visual_store_exists(video_id)
+    try:
+        meta = IndexMeta.model_validate_json(read_json_text(meta_path(video_id)))
+    except (OSError, ValueError):
+        return False
+    return visual_store_exists(video_id, generation=meta.index_generation)
 
 
 def ensure_index(source: str | None, video_id: str | None, *, rebuild: bool = False) -> str:

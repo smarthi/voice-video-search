@@ -11,7 +11,7 @@ from vvs.media.ocr import usable_ocr_text
 from vvs.media.scenes import scene_covering
 from vvs.media.shots import shot_covering
 from vvs.models import Hit, IndexMeta, Keyframe, OcrObservation, SceneCard, TranscriptSegment
-from vvs.retrieve.embed import embed_bge_query, embed_clip_texts
+from vvs.retrieve.embed import embed_bge_query, embed_clip_texts, encoder_kind, visual_dim
 from vvs.retrieve.index import list_indexed, load_index
 from vvs.retrieve.store import StoreHit
 
@@ -81,6 +81,8 @@ def search(
     *,
     top_k: int = 6,
     loaded: dict[str, Any] | None = None,
+    visual_query=None,
+    text_query=None,
 ) -> list[Hit]:
     query = (query or "").strip()
     if not query:
@@ -96,12 +98,12 @@ def search(
     scene_on = bool(getattr(meta.channels, "scene", False) and scenes)
     by_index = {frame.index: i for i, frame in enumerate(frames)}
 
-    clip_q = embed_clip_texts([query], meta=meta)[0]
+    clip_q = visual_query if visual_query is not None else embed_clip_texts([query], meta=meta)[0]
     visual_hits = bundle["visual"].search(clip_q, top_k=max(ANN_OVERFETCH, top_k * 8))
 
     text_hits: list[StoreHit] = []
     if bundle.get("text") is not None:
-        bge_q = embed_bge_query(query)[0]
+        bge_q = text_query if text_query is not None else embed_bge_query(query)[0]
         text_hits = bundle["text"].search(bge_q, top_k=max(ANN_OVERFETCH, top_k * 8))
         corpus = (
             [seg.text for seg in transcript]
@@ -220,18 +222,42 @@ def search_corpus(
     top_k: int = 6,
     loaded: dict[str, dict[str, Any]] | None = None,
 ) -> list[Hit]:
-    """Fan out one query across indexed videos and merge."""
+    """Search an archive while embedding once per visual encoder family."""
     query = (query or "").strip()
     if not query:
         return []
     ids = list(video_ids) if video_ids is not None else list_indexed()
     if not ids:
         return []
-    groups: list[list[Hit]] = []
+    bundles: dict[str, dict[str, Any]] = {}
     for vid in ids:
         try:
-            bundle = (loaded or {}).get(vid) or load_index(vid)
-            groups.append(search(vid, query, top_k=top_k, loaded=bundle))
+            bundles[vid] = (loaded or {}).get(vid) or load_index(vid)
+        except Exception as exc:
+            print(f"[search] skip {vid}: {exc}")
+    if not bundles:
+        return []
+    # BGE is shared by every text collection. Visual indexes can legally have
+    # different model families at the same width, so cache by writer identity.
+    text_q = embed_bge_query(query)[0] if any(b.get("text") is not None for b in bundles.values()) else None
+    visual_queries: dict[tuple[str, str, int], object] = {}
+    groups: list[list[Hit]] = []
+    for vid, bundle in bundles.items():
+        meta: IndexMeta = bundle["meta"]
+        key = (encoder_kind(meta=meta), str(meta.models.clip or ""), visual_dim(meta=meta))
+        if key not in visual_queries:
+            visual_queries[key] = embed_clip_texts([query], meta=meta)[0]
+        try:
+            groups.append(
+                search(
+                    vid,
+                    query,
+                    top_k=top_k,
+                    loaded=bundle,
+                    visual_query=visual_queries[key],
+                    text_query=text_q,
+                )
+            )
         except Exception as exc:
             print(f"[search] skip {vid}: {exc}")
     return merge_corpus_hits(groups, top_k=top_k, query=query)

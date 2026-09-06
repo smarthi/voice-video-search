@@ -65,11 +65,12 @@ def open_store(
     dim: int,
     settings: Settings | None = None,
     create: bool = False,
+    generation: str | None = None,
 ) -> VectorStore:
     """Open the visual or text collection, scoped to one video within the shared index."""
     from vvs.retrieve.opensearch_store import OpenSearchStore
 
-    store = OpenSearchStore(video_id, name, settings=settings)
+    store = OpenSearchStore(video_id, name, settings=settings, generation=generation)
     if create:
         store.create(dim)
     else:
@@ -77,7 +78,7 @@ def open_store(
     return store
 
 
-def visual_store_exists(video_id: str) -> bool:
+def visual_store_exists(video_id: str, *, generation: str | None = None) -> bool:
     from vvs.retrieve.opensearch_store import OpenSearchStore
 
-    return OpenSearchStore(video_id, "visual").ntotal() > 0
+    return OpenSearchStore(video_id, "visual", generation=generation).ntotal() > 0

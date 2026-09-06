@@ -16,15 +16,9 @@ first. Switching visual encoders (e.g. CLIP 512-d -> Qwen-VL 2048-d) once the
 archive is non-empty requires a fresh index, not a mixed one -- `create()`
 raises rather than silently corrupting the mapping.
 
-`search()` intentionally does not use OpenSearch's server-side k-NN filter
-(`knn.filter`). That feature's availability and exact query shape varies by
-OpenSearch version and k-NN engine, and this store only ever holds a few
-hundred to a few thousand vectors per video across a handful of videos --
-POC scale, per the same tradeoff the old FAISS thread-pinning comment made.
-So: over-fetch unfiltered, then filter to one `video_id` in Python. Simple,
-version-independent, and correct at this scale. The real on-prem design in
-CONFLUENCE_ONPREM.md uses native filtered k-NN, correctly, at cluster scale --
-this is the local-demo tradeoff, not the production one.
+`search()` uses OpenSearch's efficient inline k-NN filter (Lucene HNSW,
+available since OpenSearch 2.4). Filtering occurs during candidate retrieval,
+so one video's rows cannot crowd another out of a shared archive's global top-k.
 
 The `hybrid` search stays out of scope here too: OpenSearch's `hybrid` query
 type fuses k-NN and BM25 scores server-side via a search pipeline, but doing
@@ -49,10 +43,6 @@ from vvs.config import Settings, load_settings
 from vvs.retrieve.store import StoreHit, VectorPayload
 
 _INDEX_FOR = {"visual": "vvs_visual", "text": "vvs_text"}
-
-# Over-fetch factor for the unfiltered-then-filter-in-Python search above.
-# Generous because a POC archive is tens of videos, not millions.
-_OVERFETCH_MIN = 500
 
 
 @lru_cache(maxsize=4)
@@ -91,10 +81,12 @@ class OpenSearchStore:
         *,
         settings: Settings | None = None,
         index_override: str | None = None,
+        generation: str | None = None,
     ) -> None:
         if name not in _INDEX_FOR:
             raise ValueError(f"unknown store name {name!r}; expected one of {sorted(_INDEX_FOR)}")
         self.video_id = video_id
+        self.generation = generation
         self.name = name
         self.dim = 0
         self._client, self._settings = _connect(settings)
@@ -106,16 +98,17 @@ class OpenSearchStore:
     # -- lifecycle -----------------------------------------------------
 
     def create(self, dim: int) -> None:
-        """Ensure the shared index exists, then drop any prior rows for this video.
+        """Ensure the shared index exists, then drop any prior rows for this generation.
 
-        Mirrors FaissStore.create()'s truncate-on-rebuild semantics, scoped to
-        this video_id within the shared index rather than to a whole file.
+        A generation-aware caller only truncates a retry of its unpublished
+        generation. Older published rows remain queryable until meta.json
+        switches readers to this generation.
         """
         self.dim = int(dim)
         self._ensure_index(self.dim)
         self._client.delete_by_query(
             index=self.index,
-            body={"query": {"term": {"video_id": self.video_id}}},
+            body={"query": {"bool": {"filter": self._scope_filters()}}},
             conflicts="proceed",
             refresh=True,
             ignore=[404],
@@ -139,6 +132,13 @@ class OpenSearchStore:
                     "retrieve/opensearch_store.py. Use a fresh VVS_OPENSEARCH index (or drop "
                     f"`{self.index}`) to switch encoders."
                 )
+            # Existing developer indexes predate generation switching. Adding a
+            # keyword mapping is non-destructive and makes exact generation
+            # filters reliable rather than depending on dynamic text mapping.
+            self._client.indices.put_mapping(
+                index=self.index,
+                body={"properties": {"generation": {"type": "keyword"}}},
+            )
             return
         self._client.indices.create(
             index=self.index,
@@ -148,6 +148,7 @@ class OpenSearchStore:
                     "properties": {
                         "video_id": {"type": "keyword"},
                         "modality": {"type": "keyword"},
+                        "generation": {"type": "keyword"},
                         "vector": {
                             "type": "knn_vector",
                             "dimension": int(dim),
@@ -161,6 +162,16 @@ class OpenSearchStore:
                 },
             },
         )
+
+    def _scope_filters(self) -> list[dict[str, Any]]:
+        filters: list[dict[str, Any]] = [{"term": {"video_id": self.video_id}}]
+        if self.generation is not None:
+            filters.append({"term": {"generation": self.generation}})
+        else:
+            # Metadata written before generation switching has no token. Do
+            # not let it accidentally read a newer, unpublished rebuild.
+            filters.append({"bool": {"must_not": [{"exists": {"field": "generation"}}]}})
+        return filters
 
     def _mapped_dim(self) -> int:
         mapping = self._client.indices.get_mapping(index=self.index)
@@ -185,6 +196,8 @@ class OpenSearchStore:
             payload.asset_id = self.video_id
             doc = payload.model_dump()
             doc["video_id"] = self.video_id
+            if self.generation is not None:
+                doc["generation"] = self.generation
             doc["vector"] = vec.tolist()
             actions.append({"index": {"_index": self.index}})
             actions.append(doc)
@@ -201,18 +214,30 @@ class OpenSearchStore:
         if top_k <= 0 or not self._client.indices.exists(index=self.index):
             return []
         vec = np.ascontiguousarray(np.asarray(query_vec, dtype=np.float32).reshape(-1))
-        k = max(top_k, _OVERFETCH_MIN)
+        k = int(top_k)
         resp = self._client.search(
             index=self.index,
             body={
                 "size": k,
-                "query": {"knn": {"vector": {"vector": vec.tolist(), "k": k}}},
+                "query": {
+                    "knn": {
+                        "vector": {
+                            "vector": vec.tolist(),
+                            "k": k,
+                            "filter": {"bool": {"filter": self._scope_filters()}},
+                        }
+                    }
+                },
             },
         )
         hits: list[StoreHit] = []
         for row in resp.get("hits", {}).get("hits", []):
             source = row["_source"]
-            if source.get("video_id") != self.video_id:
+            # Keep these checks as defense in depth for a misconfigured or old
+            # OpenSearch node; normal filtering happens server-side above.
+            if source.get("video_id") != self.video_id or (
+                self.generation is not None and source.get("generation") != self.generation
+            ) or (self.generation is None and source.get("generation") is not None):
                 continue
             if filters and not _payload_matches(source, filters):
                 continue
@@ -227,7 +252,7 @@ class OpenSearchStore:
         """Every payload for this video, in insertion order. Used to re-embed in place."""
         if not self._client.indices.exists(index=self.index):
             return []
-        must: list[dict[str, Any]] = [{"term": {"video_id": self.video_id}}]
+        must: list[dict[str, Any]] = self._scope_filters()
         if modality:
             must.append({"term": {"modality": modality}})
         rows: list[VectorPayload] = []
@@ -254,9 +279,7 @@ class OpenSearchStore:
     def ntotal(self) -> int:
         if not self._client.indices.exists(index=self.index):
             return 0
-        resp = self._client.count(
-            index=self.index, body={"query": {"term": {"video_id": self.video_id}}}
-        )
+        resp = self._client.count(index=self.index, body={"query": {"bool": {"filter": self._scope_filters()}}})
         return int(resp.get("count", 0))
 
     def close(self) -> None:
@@ -265,7 +288,13 @@ class OpenSearchStore:
 
 
 def clone_video(
-    name: str, source_id: str, dest_id: str, *, settings: Settings | None = None
+    name: str,
+    source_id: str,
+    dest_id: str,
+    *,
+    settings: Settings | None = None,
+    source_generation: str | None = None,
+    dest_generation: str | None = None,
 ) -> int:
     """Copy every document for source_id into dest_id, vectors included.
 
@@ -278,10 +307,19 @@ def clone_video(
     index = _INDEX_FOR[name]
     if not client.indices.exists(index=index):
         return 0
+    client.indices.put_mapping(
+        index=index,
+        body={"properties": {"generation": {"type": "keyword"}}},
+    )
     copied = 0
+    filters: list[dict[str, Any]] = [{"term": {"video_id": source_id}}]
+    if source_generation is not None:
+        filters.append({"term": {"generation": source_generation}})
+    else:
+        filters.append({"bool": {"must_not": [{"exists": {"field": "generation"}}]}})
     resp = client.search(
         index=index,
-        body={"size": 1000, "query": {"term": {"video_id": source_id}}},
+        body={"size": 1000, "query": {"bool": {"filter": filters}}},
         scroll="1m",
     )
     scroll_id = resp.get("_scroll_id")
@@ -295,6 +333,10 @@ def clone_video(
                 doc = dict(row["_source"])
                 doc["video_id"] = dest_id
                 doc["asset_id"] = dest_id
+                if dest_generation is not None:
+                    doc["generation"] = dest_generation
+                else:
+                    doc.pop("generation", None)
                 actions.append({"index": {"_index": index}})
                 actions.append(doc)
             client.bulk(body=actions, refresh=True)
@@ -330,6 +372,30 @@ def delete_video(video_id: str, *, settings: Settings | None = None) -> None:
         client.delete_by_query(
             index=index,
             body={"query": {"term": {"video_id": video_id}}},
+            conflicts="proceed",
+            refresh=True,
+            ignore=[404],
+        )
+
+
+def delete_other_generations(
+    video_id: str, generation: str, *, settings: Settings | None = None
+) -> None:
+    """Garbage-collect rows from older generations after a successful publish."""
+    client, _ = _connect(settings)
+    for index in _INDEX_FOR.values():
+        if not client.indices.exists(index=index):
+            continue
+        client.delete_by_query(
+            index=index,
+            body={
+                "query": {
+                    "bool": {
+                        "filter": [{"term": {"video_id": video_id}}],
+                        "must_not": [{"term": {"generation": generation}}],
+                    }
+                }
+            },
             conflicts="proceed",
             refresh=True,
             ignore=[404],

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from vvs.models import Hit
+import vvs.retrieve.search as search_module
 from vvs.retrieve.search import corpus_relevance, merge_corpus_hits, search_corpus
 
 
@@ -58,6 +59,35 @@ def test_merge_single_video_passthrough() -> None:
 
 def test_empty_query_is_empty() -> None:
     assert search_corpus("   ", ["a", "b"]) == []
+
+
+def test_corpus_reuses_query_embeddings_per_encoder_family(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    bundles = {
+        "a": {"meta": SimpleNamespace(models=SimpleNamespace(clip="same")), "text": object()},
+        "b": {"meta": SimpleNamespace(models=SimpleNamespace(clip="same")), "text": object()},
+    }
+    calls = {"visual": 0, "text": 0, "search": 0}
+    monkeypatch.setattr(search_module, "encoder_kind", lambda **_kw: "qwen_vl")
+    monkeypatch.setattr(search_module, "visual_dim", lambda **_kw: 2048)
+    monkeypatch.setattr(
+        search_module,
+        "embed_clip_texts",
+        lambda *_a, **_kw: calls.__setitem__("visual", calls["visual"] + 1) or [[1.0]],
+    )
+    monkeypatch.setattr(
+        search_module,
+        "embed_bge_query",
+        lambda *_a, **_kw: calls.__setitem__("text", calls["text"] + 1) or [[1.0]],
+    )
+    monkeypatch.setattr(
+        search_module,
+        "search",
+        lambda *_a, **_kw: calls.__setitem__("search", calls["search"] + 1) or [],
+    )
+    assert search_module.search_corpus("bird", ["a", "b"], loaded=bundles) == []
+    assert calls == {"visual": 1, "text": 1, "search": 2}
 
 
 def test_ann_scores_beat_rrf_confidence() -> None:

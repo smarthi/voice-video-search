@@ -14,10 +14,12 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
+from uuid import uuid4
 
 import numpy as np
 
 from vvs.config import Settings, load_settings
+from vvs.ingest import validate_video_id
 from vvs.models import IndexMeta
 from vvs.paths import meta_path, video_dir, write_json_atomic
 from vvs.retrieve.embed import (
@@ -56,6 +58,11 @@ def reembed_visual(
     limit: int | None = None,
 ) -> ReembedResult:
     """Write `dest_id` as `source_id` with a freshly encoded visual store."""
+    try:
+        source_id = validate_video_id(source_id)
+        dest_id = validate_video_id(dest_id)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     cfg = settings or load_settings()
     if source_id == dest_id:
         raise SystemExit("source and destination ids must differ")
@@ -87,11 +94,20 @@ def reembed_visual(
         )
 
     _clone_artifacts(src_dir, dst_dir)
-    n_text = clone_video("text", source_id, dest_id, settings=cfg)
+    source_meta = IndexMeta.model_validate_json(meta_path(source_id).read_text(encoding="utf-8"))
+    generation = f"g{uuid4().hex}"
+    n_text = clone_video(
+        "text",
+        source_id,
+        dest_id,
+        settings=cfg,
+        source_generation=source_meta.index_generation,
+        dest_generation=generation,
+    )
     if n_text:
         print(f"[reembed] cloned {n_text} text-channel rows (transcript/OCR/scene) unchanged")
-    _write_visual(dest_id, cfg, frames, vecs)
-    _write_meta(source_id, dest_id, cfg, dim=int(vecs.shape[1]))
+    _write_visual(dest_id, cfg, frames, vecs, generation=generation)
+    _write_meta(source_id, dest_id, cfg, dim=int(vecs.shape[1]), generation=generation)
 
     return ReembedResult(
         video_id=dest_id,
@@ -108,7 +124,8 @@ def _read_frame_payloads(
 ) -> list[VectorPayload]:
     meta = IndexMeta.model_validate_json(meta_path(video_id).read_text(encoding="utf-8"))
     store = open_store(
-        video_id, "visual", dim=visual_dim(meta=meta), settings=cfg, create=False
+        video_id, "visual", dim=visual_dim(meta=meta), settings=cfg, create=False,
+        generation=meta.index_generation,
     )
     try:
         rows = store.all_payloads(modality="video_frame")
@@ -147,10 +164,10 @@ def _clone_artifacts(src_dir: Path, dst_dir: Path) -> None:
 
 
 def _write_visual(
-    dest_id: str, cfg: Settings, frames: list[VectorPayload], vecs: np.ndarray
+    dest_id: str, cfg: Settings, frames: list[VectorPayload], vecs: np.ndarray, *, generation: str
 ) -> None:
     store = open_store(
-        dest_id, "visual", dim=int(vecs.shape[1]), settings=cfg, create=True
+        dest_id, "visual", dim=int(vecs.shape[1]), settings=cfg, create=True, generation=generation
     )
     try:
         store.add(
@@ -174,7 +191,9 @@ def _write_visual(
         store.close()
 
 
-def _write_meta(source_id: str, dest_id: str, cfg: Settings, *, dim: int) -> None:
+def _write_meta(
+    source_id: str, dest_id: str, cfg: Settings, *, dim: int, generation: str
+) -> None:
     meta = IndexMeta.model_validate_json(meta_path(source_id).read_text(encoding="utf-8"))
     card = meta.models.model_copy(
         update={
@@ -183,7 +202,11 @@ def _write_meta(source_id: str, dest_id: str, cfg: Settings, *, dim: int) -> Non
             "visual_encoder": encoder_kind(settings=cfg),
         }
     )
-    updates: dict[str, object] = {"video_id": dest_id, "models": card}
+    updates: dict[str, object] = {
+        "video_id": dest_id,
+        "models": card,
+        "index_generation": generation,
+    }
     video = video_dir(dest_id) / "video.mp4"
     if video.exists():
         updates["video_path"] = str(video.resolve())

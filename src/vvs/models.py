@@ -115,6 +115,10 @@ class IndexMeta(BaseModel):
     channels: ChannelFlags = Field(default_factory=ChannelFlags)
     models: ModelCard
     vector_backend: str = "opensearch"
+    # A rebuild writes a complete new set of OpenSearch rows under this token,
+    # then atomically publishes this metadata file.  Older indexes predate the
+    # field and intentionally remain readable as the legacy generation.
+    index_generation: str | None = None
 
     @model_validator(mode="after")
     def _legacy_asr_channel(self) -> IndexMeta:

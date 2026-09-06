@@ -179,6 +179,27 @@ def test_dim_mismatch_across_videos_is_rejected() -> None:
         _drop_index(index)
 
 
+def test_generation_scopes_reads_and_rebuild_cleanup() -> None:
+    if _skip_without_opensearch():
+        return
+    index = _fresh_index()
+    vid = f"probe-generation-{uuid.uuid4().hex[:8]}"
+    try:
+        old = OpenSearchStore(vid, "visual", index_override=index, generation="gold")
+        old.create(2)
+        old.add(np.array([[1.0, 0.0]], dtype=np.float32), [VectorPayload(vector_id=0, asset_id=vid)])
+        new = OpenSearchStore(vid, "visual", index_override=index, generation="gnew")
+        new.create(2)
+        new.add(np.array([[0.0, 1.0]], dtype=np.float32), [VectorPayload(vector_id=0, asset_id=vid)])
+        assert old.search(np.array([1.0, 0.0]), top_k=1)
+        assert new.search(np.array([0.0, 1.0]), top_k=1)
+        assert old.search(np.array([0.0, 1.0]), top_k=1) == []
+        old.close()
+        new.close()
+    finally:
+        _drop_index(index)
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
