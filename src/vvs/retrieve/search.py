@@ -145,17 +145,46 @@ def search(
         return []
 
     asr_hits = [h for h in text_hits if h.payload.modality == "transcript"]
-    top_text_windows = _windows_from_asr_hits(asr_hits, transcript, n=1) if asr_on else []
-    anchors = _anchors_from_asr_hits(asr_hits, frames, transcript, n=1) if asr_on else set()
+    # Transcript and OCR text are both short, sparse strings (a sentence of
+    # speech, a few words of on-screen text) -- BGE-small's cosine sits
+    # ~0.6-0.7 (score ~1.6-1.7) for *any* query against *nearly any* one of
+    # them ("RefineryDigital Twin Control Room" scores 1.73 against
+    # "robotics"; "how everything is just a gesture away" scores 1.71
+    # against both "robotics" and "bindi", neither word ever spoken in
+    # that video). A genuine lexical match only clears that floor by
+    # ~0.1-0.15 -- not a usable margin to rank on. So both channels here
+    # require an actual query term in their text before they may contribute
+    # at all, the one signal dense similarity on short text can't fake.
+    # Scene captions are different in kind -- full sentences describing the
+    # frame, with real dynamic range (a real match scores ~0.5+ above noise,
+    # see corpus_relevance) -- so the scene channel keeps working by pure
+    # semantic similarity, no lexical overlap required, as already relied
+    # on by e.g. test_caption_ann_wins_without_query_words.
+    relevant_asr_hits = [h for h in asr_hits if _term_overlap(query, h.payload.text or "") > 0]
+    top_text_windows = _windows_from_asr_hits(relevant_asr_hits, transcript, n=1) if asr_on else []
+    anchors = _anchors_from_asr_hits(relevant_asr_hits, frames, transcript, n=1) if asr_on else set()
+    ocr_text_by_frame = {
+        i: _ocr_quote_for_frame(frames[i], ocr_rows)[0] for i in ocr_rank
+    } if ocr_on else {}
 
     fused: list[tuple[float, int]] = []
     for i in candidates:
         score = 0.0
         if i in visual_rank:
             score += 1.0 / (RRF_K + visual_rank[i])
-        if asr_on and i in transcript_rank and transcript_score.get(i, 0.0) > 0.05:
+        if (
+            asr_on
+            and i in transcript_rank
+            and transcript_score.get(i, 0.0) > 0.05
+            and _term_overlap(query, frame_quote.get(i, ("", None, None))[0]) > 0
+        ):
             score += TEXT_WEIGHT / (RRF_K + transcript_rank[i])
-        if ocr_on and i in ocr_rank and ocr_score.get(i, 0.0) >= OCR_MIN_SCORE:
+        if (
+            ocr_on
+            and i in ocr_rank
+            and ocr_score.get(i, 0.0) >= OCR_MIN_SCORE
+            and _term_overlap(query, ocr_text_by_frame.get(i, "")) > 0
+        ):
             score += OCR_WEIGHT / (RRF_K + ocr_rank[i])
         if scene_on and i in scene_rank and scene_score.get(i, 0.0) >= SCENE_MIN_SCORE:
             score += SCENE_WEIGHT / (RRF_K + scene_rank[i])
@@ -294,18 +323,39 @@ def corpus_relevance(hit: Hit, query: str = "") -> float:
     channel only wins by actually being the best evidence, not by stacking a
     noise floor on top of a real signal; four channels landing at ~1.6-2.0 for
     every query is worth exactly as much as one of them, not four summed.
-    Lexical overlap is a small hybrid boost. Motion / flash scalars boost only
-    when the query asks for movement or a strike.
+
+    Transcript and OCR are short, sparse text -- a sentence of speech, a few
+    words of on-screen text -- and a genuine match only clears that noise
+    floor by ~0.1-0.15 (measured: a literal query-term match against real
+    transcript scores 1.77, unrelated transcript scores 1.6-1.71). Weighted
+    by TEXT_ANN_WEIGHT/OCR_ANN_WEIGHT, that noise floor alone can still beat
+    a real but moderate scene/visual match, so those two channels only enter
+    the max() when the hit's own quote/caption actually contains a query
+    term -- the one signal dense similarity on short text can't fake. Scene
+    captions are full sentences with real dynamic range (a genuine match
+    scores ~0.5+ above noise, e.g. "kissing her on the cheek" for a kissing
+    query) and keep competing by pure semantic similarity, no gate, exactly
+    like the existing test_caption_ann_wins_without_query_words expects.
+    Lexical overlap is also a small hybrid boost in its own right. Motion /
+    flash scalars boost only when the query asks for movement or a strike.
     """
+    overlap = _hit_overlap(query, hit)
+    text_evidence = (
+        max(
+            OCR_ANN_WEIGHT * float(hit.ocr_score),
+            TEXT_ANN_WEIGHT * float(hit.transcript_score),
+        )
+        if overlap > 0
+        else 0.0
+    )
     best = max(
         float(hit.visual_score),
         SCENE_ANN_WEIGHT * float(hit.scene_score),
-        OCR_ANN_WEIGHT * float(hit.ocr_score),
-        TEXT_ANN_WEIGHT * float(hit.transcript_score),
+        text_evidence,
     )
     return (
         best
-        + LEXICAL_BLEND * _hit_overlap(query, hit)
+        + LEXICAL_BLEND * overlap
         + MOTION_BLEND * motion_query_score(query, hit.motion_energy, hit.flash_energy)
     )
 
@@ -643,17 +693,32 @@ def _merge_max_score_hits(hit_lists: list[list[StoreHit]]) -> list[StoreHit]:
 def _merge_lexical_candidates(
     dense: list[StoreHit], lexical: list[StoreHit]
 ) -> list[StoreHit]:
-    """Put exact matches first while preserving dense similarity semantics."""
-    out: list[StoreHit] = []
-    seen: set[tuple[str, str, float, int | None]] = set()
+    """Add BM25-only candidates without ever downgrading a real dense score.
+
+    A candidate that both paths agree on -- lexical AND dense -- is the
+    strongest kind of match there is (e.g. a scene caption that literally
+    says "bindi" for a "woman with bindi" query, dense score 1.82, the
+    ANN top hit already) and must keep its genuine ANN score. The previous
+    version iterated `lexical` first and unconditionally overwrote any
+    overlapping dense hit with the deliberately-conservative placeholder
+    score (~0.3, chosen so an exact match found *only* by BM25, which dense
+    similarity missed entirely, can't outrank real ANN evidence) -- so the
+    single best, most-confirmed candidate in the video was the one item
+    guaranteed to get clobbered down to ~0.3 whenever lexical search also
+    found it, which is exactly when it shouldn't be. Only a lexical hit
+    dense search did NOT already return is genuinely new information;
+    that's the only case the placeholder score belongs on.
+    """
+    dense_keys = {
+        (hit.payload.modality, hit.payload.text or "", hit.payload.t_s, hit.payload.frame_index)
+        for hit in dense
+    }
+    out: list[StoreHit] = list(dense)
     for rank, hit in enumerate(lexical, start=1):
         key = (hit.payload.modality, hit.payload.text or "", hit.payload.t_s, hit.payload.frame_index)
-        seen.add(key)
+        if key in dense_keys:
+            continue
         out.append(hit.model_copy(update={"score": max(0.05, LEXICAL_CANDIDATE_SCORE - rank * 0.001)}))
-    for hit in dense:
-        key = (hit.payload.modality, hit.payload.text or "", hit.payload.t_s, hit.payload.frame_index)
-        if key not in seen:
-            out.append(hit)
     return out
 
 

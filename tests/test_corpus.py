@@ -4,7 +4,17 @@ from __future__ import annotations
 
 import importlib
 
-from vvs.models import Hit
+import numpy as np
+
+from vvs.models import (
+    ChannelFlags,
+    Hit,
+    IndexMeta,
+    Keyframe,
+    ModelCard,
+    SceneCard,
+    TranscriptSegment,
+)
 from vvs.retrieve.store import StoreHit, VectorPayload
 from vvs.retrieve.search import corpus_relevance, merge_corpus_hits, search_corpus
 
@@ -145,6 +155,20 @@ def test_bm25_candidate_is_added_without_using_its_raw_score() -> None:
     assert merged[0].score == search_module.LEXICAL_CANDIDATE_SCORE - 0.001
 
 
+def test_bm25_candidate_already_found_by_dense_keeps_its_dense_score() -> None:
+    """Regression: a candidate found by BOTH dense ANN and BM25 -- the
+    strongest kind of match there is -- must keep its real dense score, not
+    get overwritten with the ~0.3 placeholder meant only for lexical-only
+    extras dense search missed entirely.
+    """
+    payload = VectorPayload(vector_id=0, asset_id="a", modality="scene", t_s=2.52, text="a woman with a bindi")
+    dense_hit = StoreHit(vector_id=0, score=1.82, payload=payload)
+    lexical_hit = StoreHit(vector_id=0, score=8.35, payload=payload)
+    merged = search_module._merge_lexical_candidates([dense_hit], [lexical_hit])
+    assert len(merged) == 1
+    assert merged[0].score == 1.82
+
+
 def test_uniform_text_noise_does_not_outrank_a_real_visual_match() -> None:
     """Regression: a video whose text channels all sit near BGE's noise floor
     for every query (not a watermark -- real, distinct marketing copy that
@@ -180,6 +204,128 @@ def test_uniform_text_noise_does_not_outrank_a_real_visual_match() -> None:
         [noisy_but_irrelevant, genuine_match], top_k=2, query="show me clips of kissing"
     )
     assert merged[0].video_id == "kissing_scene"
+
+
+class _FakeVisualStore:
+    def __init__(self, hits: list[StoreHit]) -> None:
+        self._hits = hits
+
+    def search(self, query_vec, top_k, filters=None):  # noqa: ANN001
+        return self._hits
+
+
+class _FakeTextStore:
+    def __init__(self, dense: list[StoreHit], lexical: list[StoreHit]) -> None:
+        self._dense = dense
+        self._lexical = lexical
+
+    def search(self, query_vec, top_k, filters=None):  # noqa: ANN001
+        return self._dense
+
+    def lexical_search(self, query, top_k):  # noqa: ANN001
+        return self._lexical
+
+
+def _fake_meta(**kwargs) -> IndexMeta:
+    defaults = dict(
+        video_id="fake",
+        source="unit-test",
+        video_path="fake.mp4",
+        models=ModelCard(clip="fake-clip", asr="fake-asr", text="fake-bge"),
+        channels=ChannelFlags(visual=True, transcript=True, asr=True, scene=True),
+    )
+    defaults.update(kwargs)
+    return IndexMeta(**defaults)
+
+
+def test_search_does_not_let_a_noisy_asr_window_bury_a_real_scene_match() -> None:
+    """Regression: real bug reproduced end-to-end through search() itself.
+
+    "show me clips of a woman with a bindi" returned frames from one long
+    ASR segment ("thank you all for joining us today", 0-20s) that never
+    mentions "bindi" at all, and never surfaced the frame at 25.5s whose
+    scene caption literally says "a woman with a red bindi on her
+    forehead" -- because (a) the noisy ASR hit's dense score (noise floor,
+    unrelated to the query) drove TEMPORAL_BOOST/anchors and the primary
+    transcript RRF term regardless of relevance, and (b) the real scene
+    hit was *also* found by BM25 lexical search (it contains "bindi"
+    verbatim) which used to clobber its genuine dense score down to the
+    ~0.3 placeholder meant only for lexical-only extras. Both are fixed;
+    this proves neither regresses.
+    """
+    frames = [
+        Keyframe(index=0, t_s=10.0, path="f0.jpg", hash_hex="a"),
+        Keyframe(index=1, t_s=25.5, path="f1.jpg", hash_hex="b"),
+    ]
+    transcript = [
+        TranscriptSegment(index=0, start_s=0.0, end_s=20.0, text="thank you all for joining us today")
+    ]
+    scenes = [
+        SceneCard(
+            scene_id=0,
+            start_s=25.0,
+            end_s=26.0,
+            frame_index=1,
+            path="f1.jpg",
+            caption="A woman with a red bindi on her forehead",
+        )
+    ]
+    meta = _fake_meta(frames=frames, transcript=transcript, scenes=scenes)
+
+    visual_hits = [
+        StoreHit(
+            vector_id=0,
+            score=1.30,
+            payload=VectorPayload(vector_id=0, asset_id="fake", t_s=25.5, frame_index=1),
+        )
+    ]
+    asr_hit = StoreHit(
+        vector_id=0,
+        score=1.75,  # noise-floor "high" score, but the text never says "bindi"
+        payload=VectorPayload(
+            vector_id=0,
+            asset_id="fake",
+            modality="transcript",
+            t_s=10.0,
+            text="thank you all for joining us today",
+        ),
+    )
+    scene_hit = StoreHit(
+        vector_id=0,
+        score=1.6,  # the real match -- lower dense score than the noise above
+        payload=VectorPayload(
+            vector_id=0,
+            asset_id="fake",
+            modality="scene",
+            t_s=25.0,
+            text="A woman with a red bindi on her forehead",
+        ),
+    )
+    # BM25 also finds the scene hit (it contains "bindi" verbatim) -- the
+    # exact overlap that used to make _merge_lexical_candidates clobber it.
+    lexical_hit = scene_hit.model_copy(update={"score": 8.0})
+
+    bundle = {
+        "meta": meta,
+        "visual": _FakeVisualStore(visual_hits),
+        "text": _FakeTextStore(dense=[asr_hit, scene_hit], lexical=[lexical_hit]),
+    }
+
+    hits = search_module.search(
+        "fake",
+        "woman with bindi",
+        top_k=2,
+        loaded=bundle,
+        visual_queries=[np.zeros(1)],
+        text_query=np.zeros(1),
+    )
+
+    assert hits[0].frame_index == 1
+    # Not clobbered down to the ~0.3 lexical-only placeholder (a tiny
+    # in-test corpus also earns _lexical_rerank's own small IDF boost on
+    # top of the 1.6 dense score, so assert well above the placeholder
+    # rather than pin the exact post-boost value).
+    assert hits[0].scene_score > 1.0
 
 
 def test_ann_scores_beat_rrf_confidence() -> None:
@@ -229,6 +375,41 @@ def test_caption_ann_wins_without_query_words() -> None:
     assert corpus_relevance(alps[0], query) > corpus_relevance(interview[0], query)
     merged = merge_corpus_hits([interview, alps], top_k=2, query=query)
     assert merged[0].video_id == "doc"
+
+
+def test_transcript_and_ocr_need_lexical_overlap_to_compete() -> None:
+    """Regression: "robotics" never spoken in this video's 3 ASR segments,
+    but one of them still scores ~1.7 (noise floor) against the query.
+    Weighted by TEXT_ANN_WEIGHT, that alone used to beat a real, moderate
+    scene match (a genuine "two humanoid robots" caption). Without a query
+    term actually in the hit's own quote/caption, transcript and ocr must
+    not enter corpus_relevance's max() at all -- scene still can, by design
+    (see test_caption_ann_wins_without_query_words), since it has real
+    dynamic range that short transcript/ocr text doesn't.
+    """
+    noisy_video = [
+        _hit(
+            "conference",
+            1,
+            0.5,
+            visual_score=1.28,
+            transcript_score=1.706,
+            quote="how everything is just a gesture away",
+            scene_caption="a man talking to the camera",
+        )
+    ]
+    robot_video = [
+        _hit(
+            "same-conference-different-scene",
+            1,
+            0.5,
+            visual_score=1.39,
+            scene_score=1.80,
+            scene_caption="A man stands in a factory surrounded by two humanoid robots.",
+        )
+    ]
+    merged = merge_corpus_hits([noisy_video, robot_video], top_k=2, query="robotics")
+    assert merged[0].video_id == "same-conference-different-scene"
 
 
 def test_spoken_robotics_beats_music_video_visual() -> None:
