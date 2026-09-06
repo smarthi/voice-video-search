@@ -149,6 +149,7 @@ class OpenSearchStore:
                         "video_id": {"type": "keyword"},
                         "modality": {"type": "keyword"},
                         "generation": {"type": "keyword"},
+                        "text": {"type": "text"},
                         "vector": {
                             "type": "knn_vector",
                             "dimension": int(dim),
@@ -247,6 +248,27 @@ class OpenSearchStore:
             if len(hits) >= top_k:
                 break
         return hits
+
+    def lexical_search(self, query: str, top_k: int) -> list[StoreHit]:
+        """Independent BM25 candidates for exact terms missed by dense ANN."""
+        if not query.strip() or top_k <= 0 or not self._client.indices.exists(index=self.index):
+            return []
+        resp = self._client.search(
+            index=self.index,
+            body={
+                "size": int(top_k),
+                "query": {
+                    "bool": {
+                        "filter": self._scope_filters(),
+                        "must": [{"match": {"text": {"query": query, "operator": "and"}}}],
+                    }
+                },
+            },
+        )
+        return [
+            StoreHit(vector_id=0, score=float(row["_score"]), payload=_payload_from_source(row["_source"]))
+            for row in resp.get("hits", {}).get("hits", [])
+        ]
 
     def all_payloads(self, modality: str | None = None) -> list[VectorPayload]:
         """Every payload for this video, in insertion order. Used to re-embed in place."""

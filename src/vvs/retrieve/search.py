@@ -6,6 +6,7 @@ import math
 import re
 from typing import Any
 
+from vvs.media.caption import expand_query_terms
 from vvs.media.motion import motion_query_score, query_motion_flags
 from vvs.media.ocr import usable_ocr_text
 from vvs.media.scenes import scene_covering
@@ -31,6 +32,7 @@ MOTION_BLEND = 0.45
 MOTION_RRF_WEIGHT = 2.5
 ANN_OVERFETCH = 48
 LEXICAL_WEIGHT = 0.14
+LEXICAL_CANDIDATE_SCORE = 0.30
 _STOP = frozenset(
     {
         "what",
@@ -81,7 +83,7 @@ def search(
     *,
     top_k: int = 6,
     loaded: dict[str, Any] | None = None,
-    visual_query=None,
+    visual_queries: list | None = None,
     text_query=None,
 ) -> list[Hit]:
     query = (query or "").strip()
@@ -98,8 +100,14 @@ def search(
     scene_on = bool(getattr(meta.channels, "scene", False) and scenes)
     by_index = {frame.index: i for i, frame in enumerate(frames)}
 
-    clip_q = visual_query if visual_query is not None else embed_clip_texts([query], meta=meta)[0]
-    visual_hits = bundle["visual"].search(clip_q, top_k=max(ANN_OVERFETCH, top_k * 8))
+    clip_qs = (
+        visual_queries
+        if visual_queries is not None
+        else embed_clip_texts(_query_texts(query), meta=meta)
+    )
+    visual_hits = _merge_max_score_hits(
+        [bundle["visual"].search(vec, top_k=max(ANN_OVERFETCH, top_k * 8)) for vec in clip_qs]
+    )
 
     text_hits: list[StoreHit] = []
     if bundle.get("text") is not None:
@@ -111,6 +119,11 @@ def search(
             + [scene.passage_text() for scene in scenes]
         )
         text_hits = _lexical_rerank(text_hits, query, corpus)
+        # BM25 scores are not comparable to cosine similarity. Convert their
+        # rank into a conservative score solely to add exact-match candidates
+        # to the existing RRF pipeline without corrupting corpus ANN ranking.
+        lexical = bundle["text"].lexical_search(query, top_k=max(ANN_OVERFETCH, top_k * 8))
+        text_hits = _merge_lexical_candidates(text_hits, lexical)
 
     visual_score, visual_rank = _channel_from_visual(visual_hits, frames, by_index)
     transcript_score, transcript_rank, frame_quote = _channel_from_transcript(
@@ -240,13 +253,16 @@ def search_corpus(
     # BGE is shared by every text collection. Visual indexes can legally have
     # different model families at the same width, so cache by writer identity.
     text_q = embed_bge_query(query)[0] if any(b.get("text") is not None for b in bundles.values()) else None
-    visual_queries: dict[tuple[str, str, int], object] = {}
+    # Expand once for the whole archive call, not once per encoder family --
+    # it's a rewrite of the query text, independent of which model embeds it.
+    texts = _query_texts(query)
+    visual_queries: dict[tuple[str, str, int], list] = {}
     groups: list[list[Hit]] = []
     for vid, bundle in bundles.items():
         meta: IndexMeta = bundle["meta"]
         key = (encoder_kind(meta=meta), str(meta.models.clip or ""), visual_dim(meta=meta))
         if key not in visual_queries:
-            visual_queries[key] = embed_clip_texts([query], meta=meta)[0]
+            visual_queries[key] = list(embed_clip_texts(texts, meta=meta))
         try:
             groups.append(
                 search(
@@ -254,7 +270,7 @@ def search_corpus(
                     query,
                     top_k=top_k,
                     loaded=bundle,
-                    visual_query=visual_queries[key],
+                    visual_queries=visual_queries[key],
                     text_query=text_q,
                 )
             )
@@ -583,6 +599,54 @@ def _lexical_rerank(hits: list[StoreHit], query: str, documents: list[str]) -> l
         adjusted.append(hit.model_copy(update={"score": float(hit.score) + boost}) if boost else hit)
     adjusted.sort(key=lambda item: item.score, reverse=True)
     return adjusted
+
+
+def _query_texts(query: str) -> list[str]:
+    """The query plus its LLM-expanded phrasings (media/caption.py), original first.
+
+    Called once per archive-wide search (search_corpus caches the embedding
+    per encoder family, not this) and once per direct single-video search()
+    call, so an expansion failure or a disabled setting costs one skipped
+    call, not a retry storm.
+    """
+    return [query, *expand_query_terms(query)]
+
+
+def _merge_max_score_hits(hit_lists: list[list[StoreHit]]) -> list[StoreHit]:
+    """Union ANN candidates across query-expansion phrasings, keeping each one's best score.
+
+    Unlike `_merge_lexical_candidates`, every list here comes from the same
+    ANN space (cosine/inner-product against the same visual index), so their
+    scores are directly comparable -- max is the right merge, not a capped
+    placeholder score.
+    """
+    if len(hit_lists) == 1:
+        return hit_lists[0]
+    best: dict[tuple[int | None, float], StoreHit] = {}
+    for hits in hit_lists:
+        for hit in hits:
+            key = (hit.payload.frame_index, hit.payload.t_s)
+            prev = best.get(key)
+            if prev is None or hit.score > prev.score:
+                best[key] = hit
+    return sorted(best.values(), key=lambda h: h.score, reverse=True)
+
+
+def _merge_lexical_candidates(
+    dense: list[StoreHit], lexical: list[StoreHit]
+) -> list[StoreHit]:
+    """Put exact matches first while preserving dense similarity semantics."""
+    out: list[StoreHit] = []
+    seen: set[tuple[str, str, float, int | None]] = set()
+    for rank, hit in enumerate(lexical, start=1):
+        key = (hit.payload.modality, hit.payload.text or "", hit.payload.t_s, hit.payload.frame_index)
+        seen.add(key)
+        out.append(hit.model_copy(update={"score": max(0.05, LEXICAL_CANDIDATE_SCORE - rank * 0.001)}))
+    for hit in dense:
+        key = (hit.payload.modality, hit.payload.text or "", hit.payload.t_s, hit.payload.frame_index)
+        if key not in seen:
+            out.append(hit)
+    return out
 
 
 def _resolve_seg_span(hit: StoreHit, transcript: list[TranscriptSegment]) -> tuple[float, float]:

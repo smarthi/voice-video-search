@@ -2,9 +2,19 @@
 
 from __future__ import annotations
 
+import importlib
+
 from vvs.models import Hit
-import vvs.retrieve.search as search_module
+from vvs.retrieve.store import StoreHit, VectorPayload
 from vvs.retrieve.search import corpus_relevance, merge_corpus_hits, search_corpus
+
+# `import vvs.retrieve.search as search_module` would silently bind the
+# *function* vvs.retrieve.search (re-exported by vvs/retrieve/__init__.py's
+# `from vvs.retrieve.search import search`), not the submodule -- because
+# importing that function overwrites the package attribute Python originally
+# set to the submodule. importlib.import_module goes through sys.modules
+# directly and is immune to that shadowing.
+search_module = importlib.import_module("vvs.retrieve.search")
 
 
 def _hit(
@@ -68,9 +78,16 @@ def test_corpus_reuses_query_embeddings_per_encoder_family(monkeypatch) -> None:
         "a": {"meta": SimpleNamespace(models=SimpleNamespace(clip="same")), "text": object()},
         "b": {"meta": SimpleNamespace(models=SimpleNamespace(clip="same")), "text": object()},
     }
-    calls = {"visual": 0, "text": 0, "search": 0}
+    calls = {"visual": 0, "text": 0, "search": 0, "expand": 0}
     monkeypatch.setattr(search_module, "encoder_kind", lambda **_kw: "qwen_vl")
     monkeypatch.setattr(search_module, "visual_dim", lambda **_kw: 2048)
+    # Stub expansion so this stays a fast, offline unit test -- expand_query_terms
+    # would otherwise load the real Qwen3-VL-Instruct model (query_expand defaults on).
+    monkeypatch.setattr(
+        search_module,
+        "expand_query_terms",
+        lambda *_a, **_kw: calls.__setitem__("expand", calls["expand"] + 1) or [],
+    )
     monkeypatch.setattr(
         search_module,
         "embed_clip_texts",
@@ -87,7 +104,45 @@ def test_corpus_reuses_query_embeddings_per_encoder_family(monkeypatch) -> None:
         lambda *_a, **_kw: calls.__setitem__("search", calls["search"] + 1) or [],
     )
     assert search_module.search_corpus("bird", ["a", "b"], loaded=bundles) == []
-    assert calls == {"visual": 1, "text": 1, "search": 2}
+    # Expansion is looked up once for the whole archive call (it's a rewrite of
+    # the query text, independent of which encoder embeds it), and visual
+    # embedding is still once per encoder family, not once per video.
+    assert calls == {"visual": 1, "text": 1, "search": 2, "expand": 1}
+
+
+def test_merge_max_score_hits_keeps_best_across_phrasings() -> None:
+    def store_hit(score: float, frame_index: int, t_s: float) -> StoreHit:
+        return StoreHit(
+            vector_id=0,
+            score=score,
+            payload=VectorPayload(vector_id=0, asset_id="a", frame_index=frame_index, t_s=t_s),
+        )
+
+    original = [store_hit(0.4, 1, 1.0), store_hit(0.9, 2, 2.0)]
+    expansion = [store_hit(0.7, 1, 1.0), store_hit(0.2, 3, 3.0)]
+    merged = search_module._merge_max_score_hits([original, expansion])
+    by_frame = {h.payload.frame_index: h.score for h in merged}
+    assert by_frame == {1: 0.7, 2: 0.9, 3: 0.2}
+    # Sorted best-first: downstream _channel_from_visual assigns rank by list order.
+    assert [h.payload.frame_index for h in merged] == [2, 1, 3]
+
+
+def test_merge_max_score_hits_single_list_is_passthrough() -> None:
+    hits = [
+        StoreHit(vector_id=0, score=0.5, payload=VectorPayload(vector_id=0, asset_id="a"))
+    ]
+    assert search_module._merge_max_score_hits([hits]) is hits
+
+
+def test_bm25_candidate_is_added_without_using_its_raw_score() -> None:
+    row = StoreHit(
+        vector_id=0,
+        score=42.0,
+        payload=VectorPayload(vector_id=0, asset_id="a", modality="transcript", text="exact term"),
+    )
+    merged = search_module._merge_lexical_candidates([], [row])
+    assert len(merged) == 1
+    assert merged[0].score == search_module.LEXICAL_CANDIDATE_SCORE - 0.001
 
 
 def test_ann_scores_beat_rrf_confidence() -> None:
@@ -235,13 +290,32 @@ def test_flash_query_prefers_lightning_still() -> None:
 
 
 if __name__ == "__main__":
-    test_merge_prefers_stronger_ann()
-    test_merge_single_video_passthrough()
-    test_empty_query_is_empty()
-    test_ann_scores_beat_rrf_confidence()
-    test_caption_ann_wins_without_query_words()
-    test_spoken_robotics_beats_music_video_visual()
-    test_instrument_still_beats_unrelated_interview_asr()
-    test_moving_query_prefers_high_motion_still()
-    test_flash_query_prefers_lightning_still()
+    import types
+
+    # No pytest here -- this repo's tests run as plain scripts (`uv run python
+    # tests/test_x.py`). Without this shim, any test taking a `monkeypatch`
+    # parameter (like test_corpus_reuses_query_embeddings_per_encoder_family
+    # below) would silently never execute under that runner.
+    class _Monkeypatch:
+        def __init__(self) -> None:
+            self._saved: list[tuple[object, str, object]] = []
+
+        def setattr(self, target, name, value) -> None:
+            self._saved.append((target, name, getattr(target, name)))
+            setattr(target, name, value)
+
+        def undo(self) -> None:
+            for target, name, value in reversed(self._saved):
+                setattr(target, name, value)
+
+    for _name, _fn in sorted(globals().items()):
+        if _name.startswith("test_") and isinstance(_fn, types.FunctionType):
+            if "monkeypatch" in _fn.__code__.co_varnames[: _fn.__code__.co_argcount]:
+                _mp = _Monkeypatch()
+                try:
+                    _fn(_mp)
+                finally:
+                    _mp.undo()
+            else:
+                _fn()
     print("ok")

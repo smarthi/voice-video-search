@@ -350,6 +350,12 @@ def warm_models() -> None:
     """Force-load visual encoder, BGE, and Whisper so the live demo pays no first-query tax."""
     embed_clip_texts(["a frame from a video"])
     _bge()
+    if load_settings().query_expand:
+        # Same Qwen3-VL-Instruct bundle scene captions use; warm it here too so
+        # a query doesn't pay this model's load time on top of its own.
+        from vvs.media.caption import expand_query_terms
+
+        expand_query_terms("a frame from a video")
     from vvs.media.transcribe import get_whisper
 
     get_whisper()

@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import numpy as np
 
-from vvs.media.caption import _want_qwen, caption_scenes, parse_qwen_caption
+from vvs.media.caption import (
+    _parse_expansion_lines,
+    _want_qwen,
+    caption_scenes,
+    expand_query_terms,
+    parse_qwen_caption,
+)
 from vvs.media.scenes import cluster_scenes, drafts_to_cards, scene_covering
 from vvs.models import Keyframe
 from vvs.retrieve.search import rrf_ceiling
@@ -139,13 +145,63 @@ def test_parse_qwen_caption_splits_objects() -> None:
     assert not _want_qwen("blip")
 
 
+def test_parse_expansion_lines_dedupes_and_strips_markers() -> None:
+    text = "1. Running water\n- flowing stream\nrunning water\n\n   \nRIVER"
+    out = _parse_expansion_lines(text, original="river", max_variants=5)
+    # "running water" repeats line 1's key and "RIVER" repeats the original;
+    # both are deduped, not just an exact-string match against the original.
+    assert out == ["Running water", "flowing stream"]
+
+
+def test_parse_expansion_lines_respects_max_variants() -> None:
+    assert _parse_expansion_lines("a\nb\nc\nd", original="orig", max_variants=2) == ["a", "b"]
+
+
+def test_expand_query_terms_empty_query_returns_empty() -> None:
+    assert expand_query_terms("   ") == []
+
+
+def test_expand_query_terms_zero_variants_returns_empty() -> None:
+    # Short-circuits before ever touching the model, regardless of VVS_QUERY_EXPAND.
+    assert expand_query_terms("river with greenery", max_variants=0) == []
+
+
+def test_expand_query_terms_disabled_by_settings(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    import vvs.media.caption as caption_module
+
+    monkeypatch.setattr(
+        caption_module,
+        "load_settings",
+        lambda: SimpleNamespace(query_expand=False, query_expand_variants=2),
+    )
+    assert caption_module.expand_query_terms("river with greenery") == []
+
+
 if __name__ == "__main__":
-    test_cluster_merges_similar_hashes()
-    test_cluster_splits_on_max_length()
-    test_cluster_uses_clip_cosine()
-    test_scene_covering_and_caption_inject()
-    test_drafts_close_intervals()
-    test_rrf_ceiling_includes_scene()
-    test_xray_html_highlights_hit()
-    test_parse_qwen_caption_splits_objects()
+    import types
+
+    class _Monkeypatch:
+        def __init__(self) -> None:
+            self._saved: list[tuple[object, str, object]] = []
+
+        def setattr(self, target, name, value) -> None:
+            self._saved.append((target, name, getattr(target, name)))
+            setattr(target, name, value)
+
+        def undo(self) -> None:
+            for target, name, value in reversed(self._saved):
+                setattr(target, name, value)
+
+    for _name, _fn in sorted(globals().items()):
+        if _name.startswith("test_") and isinstance(_fn, types.FunctionType):
+            if "monkeypatch" in _fn.__code__.co_varnames[: _fn.__code__.co_argcount]:
+                _mp = _Monkeypatch()
+                try:
+                    _fn(_mp)
+                finally:
+                    _mp.undo()
+            else:
+                _fn()
     print("ok")

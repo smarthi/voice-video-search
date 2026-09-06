@@ -40,6 +40,19 @@ class Settings(BaseSettings):
         default="qwen_vl",
         description="qwen_vl (Qwen3-VL-2B-Instruct) or blip.",
     )
+    query_expand: bool = Field(
+        default=True,
+        description=(
+            "Rewrite the query into a few alternate phrasings (Qwen3-VL-2B-Instruct, "
+            "text-only) before embedding, so a synonym gap ('river' vs 'running water') "
+            "doesn't cost a whole ANN pass. Adds one LLM call per search; set "
+            "VVS_QUERY_EXPAND=0 to skip it and search the literal query only."
+        ),
+    )
+    query_expand_variants: int = Field(
+        default=2,
+        description="How many alternate phrasings to generate per query, on top of the original.",
+    )
     shot_detect: bool = Field(
         default=False,
         description="TransNetV2 shot grouping; embed representatives only.",
