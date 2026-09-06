@@ -282,21 +282,29 @@ def search_corpus(
 def corpus_relevance(hit: Hit, query: str = "") -> float:
     """Cross-asset score from absolute ANN similarities, not per-video RRF confidence.
 
-    Picture path (visual + caption + OCR) and spoken path (transcript) compete
-    with max(), they are not summed. BGE-small cosine sits around 0.65 even on
-    unrelated talk, so adding 1.4×transcript to every interview beat a saxophone
-    still. A real spoken hit (robotics, score ~1.4 after lexical) still wins the
-    max() against a music-video picture. Lexical overlap is a small hybrid boost.
-    Motion / flash scalars boost only when the query asks for movement or a strike.
+    Visual, caption, OCR and transcript all compete with max(), none of them
+    are summed. BGE-small cosine sits around 0.65 even on unrelated talk, and
+    this is not just a transcript problem: a video whose OCR/scene text is
+    long-form but genuinely irrelevant (real marketing copy, not a watermark --
+    see media/ocr.py for that separate, narrower case) can score BGE similarity
+    to almost any query, including a nonsense one, in the same ~1.6-2.0 range
+    regardless of actual relevance. Summing that into visual_path let a
+    consistently-noisy caption/OCR channel outrank a genuinely strong visual
+    match that had no such inflated text channel to lean on. max() means a
+    channel only wins by actually being the best evidence, not by stacking a
+    noise floor on top of a real signal; four channels landing at ~1.6-2.0 for
+    every query is worth exactly as much as one of them, not four summed.
+    Lexical overlap is a small hybrid boost. Motion / flash scalars boost only
+    when the query asks for movement or a strike.
     """
-    visual_path = (
-        float(hit.visual_score)
-        + SCENE_ANN_WEIGHT * float(hit.scene_score)
-        + OCR_ANN_WEIGHT * float(hit.ocr_score)
+    best = max(
+        float(hit.visual_score),
+        SCENE_ANN_WEIGHT * float(hit.scene_score),
+        OCR_ANN_WEIGHT * float(hit.ocr_score),
+        TEXT_ANN_WEIGHT * float(hit.transcript_score),
     )
-    spoken_path = TEXT_ANN_WEIGHT * float(hit.transcript_score)
     return (
-        max(visual_path, spoken_path)
+        best
         + LEXICAL_BLEND * _hit_overlap(query, hit)
         + MOTION_BLEND * motion_query_score(query, hit.motion_energy, hit.flash_energy)
     )

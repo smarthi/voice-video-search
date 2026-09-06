@@ -145,6 +145,43 @@ def test_bm25_candidate_is_added_without_using_its_raw_score() -> None:
     assert merged[0].score == search_module.LEXICAL_CANDIDATE_SCORE - 0.001
 
 
+def test_uniform_text_noise_does_not_outrank_a_real_visual_match() -> None:
+    """Regression: a video whose text channels all sit near BGE's noise floor
+    for every query (not a watermark -- real, distinct marketing copy that
+    just happens to score similarly against almost anything) must not
+    outrank a video with a genuinely elevated, single-channel match, just
+    because it has more channels to sum. Summing let 0.55*1.7 (ocr) push a
+    "kissing" query's top hit to an unrelated corporate video ahead of the
+    actual kissing scene, which had no ocr contribution at all.
+    """
+    noisy_but_irrelevant = [
+        _hit(
+            "corporate",
+            1,
+            0.95,
+            visual_score=1.30,
+            transcript_score=1.66,
+            ocr_score=1.67,
+            scene_score=1.75,
+            scene_caption="Our platform delivers peer-reviewed research to clinicians.",
+        )
+    ]
+    genuine_match = [
+        _hit(
+            "kissing_scene",
+            1,
+            0.98,
+            visual_score=1.46,
+            scene_score=2.30,
+            scene_caption="A man and a woman are kissing passionately in a dimly lit room.",
+        )
+    ]
+    merged = merge_corpus_hits(
+        [noisy_but_irrelevant, genuine_match], top_k=2, query="show me clips of kissing"
+    )
+    assert merged[0].video_id == "kissing_scene"
+
+
 def test_ann_scores_beat_rrf_confidence() -> None:
     """Interview can look 92% confident from ASR extras and still lose."""
     interview = [
