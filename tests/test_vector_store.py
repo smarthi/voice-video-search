@@ -180,6 +180,15 @@ def test_dim_mismatch_across_videos_is_rejected() -> None:
 
 
 def test_generation_scopes_reads_and_rebuild_cleanup() -> None:
+    """A generation-scoped store must only ever see its own generation's rows.
+
+    A k-NN query with top_k=1 always returns the nearest *in-scope* candidate
+    if one exists -- it cannot return [] just because the query vector looks
+    nothing like it. So isolation has to be checked by identity (which row
+    came back), not by expecting an empty result: `old` still holds one row
+    of its own, and querying it with `new`'s vector must still surface that
+    row, not `new`'s.
+    """
     if _skip_without_opensearch():
         return
     index = _fresh_index()
@@ -187,13 +196,25 @@ def test_generation_scopes_reads_and_rebuild_cleanup() -> None:
     try:
         old = OpenSearchStore(vid, "visual", index_override=index, generation="gold")
         old.create(2)
-        old.add(np.array([[1.0, 0.0]], dtype=np.float32), [VectorPayload(vector_id=0, asset_id=vid)])
+        old.add(
+            np.array([[1.0, 0.0]], dtype=np.float32),
+            [VectorPayload(vector_id=0, asset_id=vid, t_s=1.0)],
+        )
         new = OpenSearchStore(vid, "visual", index_override=index, generation="gnew")
         new.create(2)
-        new.add(np.array([[0.0, 1.0]], dtype=np.float32), [VectorPayload(vector_id=0, asset_id=vid)])
-        assert old.search(np.array([1.0, 0.0]), top_k=1)
-        assert new.search(np.array([0.0, 1.0]), top_k=1)
-        assert old.search(np.array([0.0, 1.0]), top_k=1) == []
+        new.add(
+            np.array([[0.0, 1.0]], dtype=np.float32),
+            [VectorPayload(vector_id=0, asset_id=vid, t_s=2.0)],
+        )
+        own_hits = old.search(np.array([1.0, 0.0]), top_k=1)
+        assert own_hits and own_hits[0].payload.t_s == 1.0
+        new_hits = new.search(np.array([0.0, 1.0]), top_k=1)
+        assert new_hits and new_hits[0].payload.t_s == 2.0
+        # Query old with new's own vector: isolation means old can only ever
+        # surface its own row (t_s=1.0), never new's (t_s=2.0), regardless of
+        # which one the query vector actually resembles.
+        cross_hits = old.search(np.array([0.0, 1.0]), top_k=1)
+        assert cross_hits and cross_hits[0].payload.t_s == 1.0
         old.close()
         new.close()
     finally:
