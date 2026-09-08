@@ -105,6 +105,14 @@ def build_index(
     frames = []
     if want_shots:
         report("shots")
+        if should_evict():
+            # TransNetV2 is 7.6M params but still wants activation memory and a
+            # cuDNN workspace per window. A process that has served a search is
+            # holding both 2B models -- the captioner for query expansion, the
+            # encoder for the query vector -- and neither is needed again until
+            # the visual stage, so on a small card they only starve this one.
+            release_captioner()
+            release_visual_encoder()
         t0 = perf_counter()
         try:
             shots, motion_track = detect_shots(

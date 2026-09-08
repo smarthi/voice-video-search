@@ -387,11 +387,22 @@ def test_indexing_releases_the_other_model_at_each_stage_boundary() -> None:
     from vvs.retrieve import index
 
     src = inspect.getsource(index.build_index)
+    shots = src.index('report("shots")')
     visual = src.index('report("visual")')
     caption = src.index('report("caption")')
-    # The captioner is dropped before embedding, the encoder before captioning.
-    assert 0 < src.index("release_captioner()") - visual < caption - visual
-    assert src.index("release_visual_encoder()") > caption
+    assert shots < visual < caption, "stages ran in an unexpected order"
+
+    at_shots, at_visual, at_caption = src[shots:visual], src[visual:caption], src[caption:]
+    # TransNetV2 wants the card too, and a process serving the UI reaches this
+    # point holding both 2B models: the captioner from query expansion and the
+    # encoder from the query vector. Neither is needed until the visual stage.
+    assert "release_captioner()" in at_shots
+    assert "release_visual_encoder()" in at_shots
+    # From there it is one model at a time: the captioner goes before
+    # embedding, the encoder before captioning.
+    assert "release_captioner()" in at_visual
+    assert "release_visual_encoder()" not in at_visual
+    assert "release_visual_encoder()" in at_caption
 
 
 def _clear_device_env() -> None:
