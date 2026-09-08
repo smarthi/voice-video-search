@@ -104,10 +104,7 @@ def test_inference_inputs_are_moved_to_wherever_the_weights_landed() -> None:
 
 
 if __name__ == "__main__":
-    test_predictions_to_scenes_finds_cuts()
-    test_predictions_all_one_shot()
-    test_pick_reps_caps_long_shot()
-    test_pick_reps_one_per_short_shot()
-    test_scenes_to_shots_and_covering()
-    test_drafts_from_shots()
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
     print("ok")
