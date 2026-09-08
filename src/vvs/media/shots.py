@@ -6,12 +6,14 @@ time floor so a 3-minute fly-through does not collapse to a single vector.
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
+from vvs.device import resolve_device
 from vvs.media.frames import dhash64, _save_jpeg
 from vvs.media.motion import energy_at, flash_peak_times
 from vvs.models import Keyframe, MotionSample, ShotSpan
@@ -170,6 +172,7 @@ def predict_shot_scores_stream(video_file: Path) -> tuple[np.ndarray, np.ndarray
     stream.thread_type = "AUTO"
     rate = float(stream.average_rate) if stream.average_rate else 0.0
     model = _transnet()
+    device = _model_device(model)
     buffer: list[np.ndarray] = []
     times: list[float] = []
     track: list[MotionSample] = []
@@ -183,7 +186,10 @@ def predict_shot_scores_stream(video_file: Path) -> tuple[np.ndarray, np.ndarray
         while len(buffer) >= WINDOW:
             window = np.stack(buffer[:WINDOW], axis=0)
             with torch.no_grad():
-                single, _many = model(torch.from_numpy(window).unsqueeze(0))
+                # uint8 48x27 RGB, so a window is ~390 KB -- the transfer is
+                # noise next to the forward pass it feeds.
+                batch = torch.from_numpy(window).unsqueeze(0).to(device)
+                single, _many = model(batch)
                 preds.append(torch.sigmoid(single)[0, CONTEXT : CONTEXT + STRIDE, 0].cpu().numpy())
             del buffer[:STRIDE]
 
@@ -294,6 +300,7 @@ def predict_shot_scores(frames: np.ndarray) -> np.ndarray:
     import torch
 
     model = _transnet()
+    device = _model_device(model)
     n = int(frames.shape[0])
     pad_start = CONTEXT
     pad_end = CONTEXT + STRIDE - (n % STRIDE if n % STRIDE != 0 else STRIDE)
@@ -305,7 +312,7 @@ def predict_shot_scores(frames: np.ndarray) -> np.ndarray:
         ptr = 0
         while ptr + WINDOW <= len(padded):
             window = padded[ptr : ptr + WINDOW]
-            tensor = torch.from_numpy(window).unsqueeze(0)
+            tensor = torch.from_numpy(window).unsqueeze(0).to(device)
             single, _many = model(tensor)
             chunk = torch.sigmoid(single)[0, CONTEXT : CONTEXT + STRIDE, 0].cpu().numpy()
             preds.append(chunk)
@@ -317,6 +324,21 @@ def predict_shot_scores(frames: np.ndarray) -> np.ndarray:
     return scores.astype(np.float32)
 
 
+def shot_device() -> str:
+    """Where to run TransNetV2.
+
+    The forward pass is ~87% of shot detection, not the decode: measured on one
+    263-second video, inference was 271.9s of 310.8s on CPU (1732 ms per
+    100-frame window) against 4.0s on CUDA (25.3 ms), a 68x difference that
+    took the whole stage from 311s to 43s. So it follows the shared device
+    choice rather than staying on CPU. `VVS_SHOT_DEVICE` overrides, which
+    matters because the color-histogram path uses an int32 `scatter_add_` that
+    a given Metal build may or may not implement natively.
+    """
+    want = (os.environ.get("VVS_SHOT_DEVICE") or "").strip().lower()
+    return want or resolve_device()
+
+
 @lru_cache(maxsize=1)
 def _transnet():
     import torch
@@ -324,12 +346,28 @@ def _transnet():
     from vvs.media.transnetv2_model import TransNetV2
 
     weights = _weights_path()
-    print(f"[shots] loading TransNetV2 ({weights})")
+    device = shot_device()
+    print(f"[shots] loading TransNetV2 ({weights}) on {device}")
     model = TransNetV2()
     state = torch.load(weights, map_location="cpu", weights_only=True)
     model.load_state_dict(state)
     model.eval()
+    if device != "cpu":
+        try:
+            model.to(device)
+        except Exception as exc:
+            # 7.6M params is not what would exhaust a card, so a failure here
+            # is a broken backend rather than pressure; CPU still works.
+            print(
+                f"[shots] {device} unavailable for TransNetV2 "
+                f"({type(exc).__name__}: {exc}); using cpu"
+            )
     return model
+
+
+def _model_device(model):
+    """Where the weights actually landed, which may not be what was requested."""
+    return next(model.parameters()).device
 
 
 def _weights_path() -> Path:

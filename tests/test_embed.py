@@ -305,8 +305,97 @@ def test_embed_and_caption_share_one_device_decision() -> None:
     assert embed.resolve_dtype is caption.resolve_dtype
 
 
+def test_eviction_is_off_without_a_device_that_reports_memory() -> None:
+    """CPU has nothing to hand back, so reloading a model would be pure loss."""
+    from vvs import device
+
+    _clear_device_env()
+    device.should_evict.cache_clear()
+    original = device.device_memory_gb
+    try:
+        device.device_memory_gb = lambda: 0.0
+        assert device.should_evict() is False
+    finally:
+        device.device_memory_gb = original
+        device.should_evict.cache_clear()
+
+
+def test_eviction_turns_on_only_below_the_two_model_threshold() -> None:
+    from vvs import device
+
+    _clear_device_env()
+    original = device.device_memory_gb
+    try:
+        # An 8 GB card cannot hold the 2B encoder and the 2B captioner at once.
+        device.device_memory_gb = lambda: 8.0
+        device.should_evict.cache_clear()
+        assert device.should_evict() is True
+        # A 128 GB unified-memory Mac keeps both, as it did before this existed.
+        device.device_memory_gb = lambda: 96.0
+        device.should_evict.cache_clear()
+        assert device.should_evict() is False
+    finally:
+        device.device_memory_gb = original
+        device.should_evict.cache_clear()
+
+
+def test_evict_env_override_wins_over_measured_memory() -> None:
+    from vvs import device
+
+    _clear_device_env()
+    original = device.device_memory_gb
+    try:
+        device.device_memory_gb = lambda: 96.0
+        os.environ["VVS_EVICT_MODELS"] = "1"
+        device.should_evict.cache_clear()
+        assert device.should_evict() is True
+        device.device_memory_gb = lambda: 8.0
+        os.environ["VVS_EVICT_MODELS"] = "0"
+        device.should_evict.cache_clear()
+        assert device.should_evict() is False
+    finally:
+        device.device_memory_gb = original
+        os.environ.pop("VVS_EVICT_MODELS", None)
+        device.should_evict.cache_clear()
+
+
+def test_release_drops_the_cached_models_and_frees_the_allocator() -> None:
+    """Clearing an lru_cache alone leaves the blocks reserved on the card."""
+    from vvs.media import caption
+    from vvs.retrieve import embed
+
+    for module, release, loaders in (
+        (embed, embed.release_visual_encoder, (embed._sentence_transformer, embed._clip_bundle)),
+        (caption, caption.release_captioner, (caption._qwen_bundle, caption._blip_bundle)),
+    ):
+        called: list[bool] = []
+        original = module.empty_cache
+        try:
+            module.empty_cache = lambda: called.append(True)
+            release()
+        finally:
+            module.empty_cache = original
+        assert called == [True], f"{module.__name__} released without freeing the allocator"
+        for loader in loaders:
+            assert loader.cache_info().currsize == 0
+
+
+def test_indexing_releases_the_other_model_at_each_stage_boundary() -> None:
+    """Both 2B models resident on a small card thrashes instead of failing."""
+    import inspect
+
+    from vvs.retrieve import index
+
+    src = inspect.getsource(index.build_index)
+    visual = src.index('report("visual")')
+    caption = src.index('report("caption")')
+    # The captioner is dropped before embedding, the encoder before captioning.
+    assert 0 < src.index("release_captioner()") - visual < caption - visual
+    assert src.index("release_visual_encoder()") > caption
+
+
 def _clear_device_env() -> None:
-    for key in ("VVS_DEVICE", "VVS_VISUAL_DTYPE", "VVS_VISUAL_BATCH"):
+    for key in ("VVS_DEVICE", "VVS_VISUAL_DTYPE", "VVS_VISUAL_BATCH", "VVS_EVICT_MODELS"):
         os.environ.pop(key, None)
 
 

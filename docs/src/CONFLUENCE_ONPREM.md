@@ -2,11 +2,11 @@
 
 Status: the core idea — one shared OpenSearch index across the archive, not one file per video — is implemented in the prototype as a single local node (`retrieve/opensearch_store.py`, `docker-compose.yml`). Everything else on this page — Kafka ingest, consumer groups, sharded/replicated OpenSearch, the `hybrid` k-NN+BM25 query, vLLM serving — is still design, not implemented in this repo.  
 Audience: platform / ML engineers standing up large-scale ingest and search.  
-Companion: the CPU prototype is [`CONFLUENCE.md`](CONFLUENCE.md). This page is the on-prem shape of the same object model.
+Companion: the working prototype is the repo itself; its README covers the single-node pipeline. This page is the on-prem shape of the same object model.
 
 **Confluence import.** Paste `docs/CONFLUENCE_ONPREM.md`. Every diagram is embedded in the file as a base64 PNG, so the page needs no Mermaid macro, no attachments, and no outbound network access.
 
-If your Confluence strips `data:` image URIs, fall back to attaching the ten PNGs from `docs/images/diagrams/onprem-*.png` to the page — that route is also fully offline.
+If the figures come out blank, this Confluence strips `data:` image URIs — a common security default. Use `docs/CONFLUENCE_ONPREM_ATTACH.md` instead: attach the ten PNGs from `docs/images/diagrams/onprem-*.png` to the page first, then paste that version, whose image references are bare filenames Confluence resolves to those attachments. That route is also fully offline.
 
 Editing: the prose lives in `docs/src/CONFLUENCE_ONPREM.md` and the diagram sources in `docs/diagrams/*.mmd`. `docs/CONFLUENCE_ONPREM.md` is generated — do not edit it directly.
 
@@ -806,7 +806,7 @@ Note the GPU ratio: **more caption GPUs than embed GPUs**, the opposite of what 
 ## 17. Confluence import checklist
 
 - Title: *Voice Video Search — on-prem ingest and retrieval, 50 PB*
-- Same space as the CTO demo page; link [`CONFLUENCE.md`](CONFLUENCE.md) as "what runs on the demo box"
-- Paste [`CONFLUENCE_ONPREM_INLINE.md`](CONFLUENCE_ONPREM_INLINE.md) if you do not want to attach files. Otherwise attach the ten PNGs from `docs/images/diagrams/onprem-*.png`
+- Same space as the CTO demo page, which covers what runs on the demo box
+- Paste the generated `docs/CONFLUENCE_ONPREM.md`, which already has every diagram inlined as base64, so no files need attaching. Otherwise attach the ten PNGs from `docs/images/diagrams/onprem-*.png`
 - No Mermaid macro is needed for either route
 - Flag §7.1 and §15.1 to the storage and platform teams — bitrate and decode throughput are the two numbers they must confirm

@@ -25,7 +25,7 @@ import numpy as np
 from PIL import Image
 
 from vvs.config import load_settings
-from vvs.device import force_cpu, resolve_device, resolve_dtype, torch_dtype
+from vvs.device import empty_cache, force_cpu, resolve_device, resolve_dtype, torch_dtype
 
 QWEN_VL_2B = "Qwen/Qwen3-VL-Embedding-2B"
 QWEN_VL_8B = "Qwen/Qwen3-VL-Embedding-8B"
@@ -302,6 +302,18 @@ def _probe_finite(model) -> bool:
         print(f"[embed] dtype probe failed ({type(exc).__name__}: {exc}); assuming ok")
         return True
     return bool(out.size) and bool(np.isfinite(out).all()) and float(np.abs(out).max()) > 0
+
+
+def release_visual_encoder() -> None:
+    """Drop the cached visual encoder and give its device memory back.
+
+    Called at a stage boundary during indexing, where the encoder is finished
+    with for this video and the captioner is about to want the same card.
+    """
+    _sentence_transformer.cache_clear()
+    _clip_bundle.cache_clear()
+    empty_cache()
+    print("[embed] released the visual encoder")
 
 
 def _qwen_vl(model_id: str):

@@ -84,6 +84,88 @@ device — fp16 and 8 frames per pass on a GPU, fp32 and 1 frame on CPU, since C
 fp16 is emulated and slower than fp32. Override with `VVS_VISUAL_DTYPE` and
 `VVS_VISUAL_BATCH`.
 
+Getting onto the GPU at all is what matters; the batch width is a rounding error
+next to it. Measured on one Linux box (RTX PRO 2000, 8 GB, Qwen3-VL-Embedding-2B,
+96 keyframes):
+
+| device | batch | s/frame | peak |
+| --- | --- | --- | --- |
+| CPU, fp32 | 1 | 49.4 | — |
+| CUDA, fp16 | 1 | 0.342 | 4.4 GB |
+| CUDA, fp16 | 8 (default) | 0.270 | 5.2 GB |
+| CUDA, fp16 | 16 | 0.254 | 6.2 GB |
+| CUDA, fp16 | 32 | 2.362 | 8.0 GB |
+
+The GPU is worth ~180×. Widening the batch from 1 to 16 is worth 1.35×, and from
+the default 8 to 16 only 6% for another ~940 MB — not worth the lost headroom,
+so the default stays 8. Batch 32 does not fit in 8 GB and collapses to 9× *slower*
+than batch 8; the cliff is sudden rather than gradual, which is the reason to keep
+a margin. Measure your own hardware with `scripts/bench_batch.py`, which also
+verifies that a wider batch has not moved the vectors (padded batched attention
+reorders fp16 reductions, so expect agreement around cosine 0.9996 — that is
+arithmetic, not a quality change).
+
+**Read that table as an upper bound: it loads the encoder alone.** A real index
+run also needs the 2B captioner, and each model wants ~5 GB in fp16, so on this
+8 GB card they cannot both be resident. Holding both does not fail cleanly — the
+allocator thrashes, flushing and re-reserving on nearly every call. Measured
+across one 16-video reindex, the first video embedded at 0.33 s/frame and every
+video after its captioning stage ran at 7.8–9.9 s/frame, which is *slower than
+CPU* (4–6 s/frame). Two processes are worse still: a long-lived `vvs app` holding
+~5 GB leaves a separate reindex nothing to work with.
+
+So `build_index` drops the model it has finished with at each stage boundary —
+the captioner before embedding, the encoder before captioning — whenever the
+device reports less than `EVICT_UNDER_GB` (16 GB). Reloading costs seconds per
+video; sharing a too-small card costs minutes. `VVS_EVICT_MODELS=0` or `=1`
+forces the choice. A 128 GB unified-memory Mac reports well above the threshold
+and keeps both models loaded, exactly as before.
+
+Re-running one identical video (47 keyframes, 29 scenes) before and after:
+
+| stage | both resident | one at a time | gain |
+| --- | --- | --- | --- |
+| visual embed | 9.451 s/frame | 0.280 s/frame | 33.7× |
+| caption | 14.96 s/scene | 2.43 s/scene | 6.2× |
+| whole index | 1452.6 s | 559.4 s | 2.6× |
+
+0.280 s/frame is the 0.270 the isolated benchmark predicted, so memory pressure
+was the whole story.
+
+That left TransNetV2 as the dominant cost at 69% of the run, and profiling it
+showed the forward pass — not the video decode — was 87% of the stage (271.9 s
+of 310.8 s, at 1732 ms per 100-frame window). It was on the CPU only because the
+model was never moved to a device. On the GPU it runs at 25.3 ms/window, **68×
+faster**, taking shot detection from 385 s to 47 s. `VVS_SHOT_DEVICE` overrides,
+since the color-histogram path uses an int32 `scatter_add_` that a given Metal
+build may not implement natively. CPU and GPU were verified to produce identical
+cuts on a 29-shot video — zero frames changed side of the 0.5 threshold, every
+boundary matched to 0.0000 s.
+
+The two fixes together, on the same 263-second video:
+
+| stage | before | after | device |
+| --- | --- | --- | --- |
+| TransNetV2 shots | 489.9 s | 46.9 s | GPU |
+| caption (29 scenes) | 433.7 s | 66.1 s | GPU |
+| OCR | 55.3 s | 49.2 s | CPU |
+| ASR | 27.8 s | 31.1 s | CPU |
+| visual embed (47 frames) | 444.2 s | 16.5 s | GPU |
+| **total** | **1452.6 s** | **211.8 s** | |
+
+**6.9× end to end**, with no change to any model or hyperparameter. Nothing
+dominates now; decode and the PIL resize are ~90% of what is left in shot
+detection, and ASR is the last stage stuck on the CPU by design.
+
+This is per process. If you run the UI and a separate CLI reindex at once on a
+small card they still contend, because each holds its own copy — index through
+the UI, or stop it for the duration of a batch run.
+
+On Linux, `pyproject.toml` installs a CUDA build of torch (`cu130`; Blackwell
+`sm_120` needs 12.8 or newer and torch publishes no `cu128` wheels). macOS stays
+on the plain index, which costs it nothing — `cpu` there names only the non-CUDA
+variant and those wheels carry Metal support.
+
 Three guards keep the GPU path from being worse than the CPU one. `vvs/__init__.py`
 sets `PYTORCH_ENABLE_MPS_FALLBACK=1` **before anything imports torch** — PyTorch
 reads it when the MPS backend initializes, so setting it later does nothing and a
@@ -489,9 +571,11 @@ Commands: `uv run vvs index|query|app|warm|list`.
 | `VVS_VISUAL_TRUNCATE_DIM` | Matryoshka width for WeMM only; must be a supported dim |
 | `VVS_DEVICE` | `mps`, `cuda`, or `cpu`. Default auto-detects (mps → cuda → cpu) |
 | `VVS_VISUAL_DTYPE` | `float16`, `bfloat16`, `float32`. Default fp16 on GPU, fp32 on CPU |
-| `VVS_VISUAL_BATCH` | Frames per forward pass. Default 8 on GPU, 1 on CPU |
+| `VVS_VISUAL_BATCH` | Frames per forward pass. Default 8 on GPU, 1 on CPU. Measure with `scripts/bench_batch.py` |
+| `VVS_EVICT_MODELS` | `1` / `0` to force unloading one 2B model before loading the other. Default: on below 16 GB of device memory |
+| `VVS_SHOT_DEVICE` | Device for TransNetV2. Default: the shared device choice |
 | `VVS_FAULTHANDLER` | `0` disables the C-level traceback on fatal signals |
 
 Search weights live in `retrieve/search.py` (not env): per-video RRF (`TEXT_WEIGHT` 1.6, `OCR_WEIGHT` 0.6, `SCENE_WEIGHT` 1.0) and archive merge (`SCENE_ANN_WEIGHT` 1.15, `TEXT_ANN_WEIGHT` 1.4, `OCR_ANN_WEIGHT` 0.55, `LEXICAL_BLEND` 0.2, `MOTION_BLEND` 0.45). Motion/flash keep thresholds are in `media/motion.py` (`FLASH_KEEP` 0.22, `MOTION_KEEP` 0.18).
 
-Docs for Confluence: [`docs/CONFLUENCE.md`](docs/CONFLUENCE.md) (diagrams in [`docs/images/`](docs/images/)). Self-contained paste-in with inlined figures: [`VOICE_VIDEO_SEARCH.md`](VOICE_VIDEO_SEARCH.md).
+Docs for Confluence, a self-contained paste-in with figures inlined as base64 PNGs (no Mermaid macro or attachments needed): [`docs/CONFLUENCE_ONPREM.md`](docs/CONFLUENCE_ONPREM.md), the design for scaling this pipeline to a 50 PB on-prem archive. If your Confluence strips `data:` image URIs and the figures render blank, paste [`docs/CONFLUENCE_ONPREM_ATTACH.md`](docs/CONFLUENCE_ONPREM_ATTACH.md) instead, having first attached the matching `docs/images/diagrams/*.png` to the page. Both are generated from `docs/src/` by `scripts/inline_docs.py`; edit the source, not the generated files. This README is the reference for the single-node system that actually runs here.

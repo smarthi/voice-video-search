@@ -11,8 +11,9 @@ from uuid import uuid4
 import numpy as np
 
 from vvs.config import load_settings
+from vvs.device import should_evict
 from vvs.ingest import extract_video_id, ingest, validate_video_id
-from vvs.media.caption import caption_scenes
+from vvs.media.caption import caption_scenes, release_captioner
 from vvs.media.frames import extract_keyframes
 from vvs.media.ocr import is_slide_heavy, ocr_frames
 from vvs.media.probe import has_audio_stream
@@ -41,6 +42,7 @@ from vvs.retrieve.embed import (
     embed_bge_texts,
     embed_clip_images,
     encoder_kind,
+    release_visual_encoder,
     visual_dim,
     visual_model_label,
 )
@@ -152,6 +154,11 @@ def build_index(
 
     report("visual")
     t0 = perf_counter()
+    if should_evict():
+        # The previous video's caption stage, or a query expansion in this
+        # process if it is also serving the UI, may still be holding the
+        # captioner on a card too small for both 2B models.
+        release_captioner()
     frame_vecs = embed_clip_images([frame.path for frame in frames], settings=settings)
     timings.clip_embed_s = perf_counter() - t0
 
@@ -185,6 +192,10 @@ def build_index(
         timings.scenes_s = perf_counter() - t0
         report("caption")
         t0 = perf_counter()
+        if should_evict():
+            # Scene drafting is done with frame_vecs (plain numpy), so the
+            # encoder itself is no longer needed for this video.
+            release_visual_encoder()
         try:
             scenes = caption_scenes(
                 frames,

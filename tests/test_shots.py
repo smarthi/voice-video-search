@@ -71,6 +71,38 @@ def test_drafts_from_shots() -> None:
     assert drafts[1].frame_index == 1
 
 
+def test_shot_device_follows_the_shared_choice_and_honours_its_override() -> None:
+    """Inference is ~87% of shot detection, so this must not silently sit on CPU."""
+    import os
+
+    from vvs.device import resolve_device
+    from vvs.media.shots import shot_device
+
+    os.environ.pop("VVS_SHOT_DEVICE", None)
+    assert shot_device() == resolve_device()
+    try:
+        # The int32 scatter_add_ in the histogram path is the reason an escape
+        # hatch exists at all.
+        os.environ["VVS_SHOT_DEVICE"] = "cpu"
+        assert shot_device() == "cpu"
+    finally:
+        os.environ.pop("VVS_SHOT_DEVICE", None)
+
+
+def test_inference_inputs_are_moved_to_wherever_the_weights_landed() -> None:
+    """A requested device can be refused at load time; inputs must still match."""
+    import inspect
+
+    from vvs.media import shots
+
+    for fn in (shots.predict_shot_scores_stream, shots.predict_shot_scores):
+        src = inspect.getsource(fn)
+        assert "_model_device(model)" in src, f"{fn.__name__} assumes a device"
+        assert src.count(".to(device)") >= 1, f"{fn.__name__} feeds an unmoved tensor"
+        # Scores come back to numpy, so the caller never sees a device tensor.
+        assert ".cpu().numpy()" in src
+
+
 if __name__ == "__main__":
     test_predictions_to_scenes_finds_cuts()
     test_predictions_all_one_shot()

@@ -32,7 +32,7 @@ FENCE = re.compile(r"```mermaid\n(.*?)```\n", re.S)
 HEADING = re.compile(r"^#{2,4} +(.*)$", re.M)
 
 WIDTH = 1800
-PREFIXES = {"CONFLUENCE": "proto", "CONFLUENCE_ONPREM": "onprem"}
+PREFIXES = {"CONFLUENCE_ONPREM": "onprem"}
 
 # Both services reject the default urllib agent.
 UA = "Mozilla/5.0 (X11; Linux x86_64) render_diagrams.py"

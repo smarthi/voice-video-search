@@ -16,7 +16,14 @@ from pathlib import Path
 from PIL import Image
 
 from vvs.config import load_settings
-from vvs.device import force_cpu, resolve_device, resolve_dtype, to_device, torch_dtype
+from vvs.device import (
+    empty_cache,
+    force_cpu,
+    resolve_device,
+    resolve_dtype,
+    to_device,
+    torch_dtype,
+)
 from vvs.media.scenes import SceneDraft, drafts_to_cards
 from vvs.models import Keyframe, SceneCard
 
@@ -47,6 +54,19 @@ _qwen_expand_disabled: str | None = None
 
 
 CaptionFn = Callable[[str], tuple[str, list[str], str]]
+
+
+def release_captioner() -> None:
+    """Drop the cached captioner and give its device memory back.
+
+    Called at a stage boundary during indexing, where the visual encoder is
+    about to want the same card. Also covers the case where this process is a
+    long-lived UI that captioned or expanded a query earlier.
+    """
+    _qwen_bundle.cache_clear()
+    _blip_bundle.cache_clear()
+    empty_cache()
+    print("[caption] released the captioner")
 
 
 def caption_scenes(
