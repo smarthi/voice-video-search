@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     port: int = 7860
     opensearch_url: str = Field(
         default="http://localhost:9200",
-        description="OpenSearch endpoint. `docker compose up -d` starts one locally.",
+        description="OpenSearch endpoint. `podman compose up -d` starts one locally.",
     )
     opensearch_timeout_s: float = Field(
         default=10.0,

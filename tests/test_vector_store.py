@@ -1,6 +1,6 @@
 """Checks for the OpenSearch-backed VectorStore (no model download).
 
-These need a reachable OpenSearch (`docker compose up -d`); each test skips
+These need a reachable OpenSearch (`podman compose up -d`); each test skips
 itself with a printed reason when one isn't there, the same way
 `test_force_mute_skips_asr` skips when the demo video isn't present.
 
@@ -26,7 +26,7 @@ from vvs.retrieve.store import VectorPayload
 def _skip_without_opensearch() -> bool:
     if ping():
         return False
-    print("[test_vector_store] OpenSearch unreachable; run `docker compose up -d`. Skipping.")
+    print("[test_vector_store] OpenSearch unreachable; run `podman compose up -d`. Skipping.")
     return True
 
 

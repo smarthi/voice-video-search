@@ -66,7 +66,7 @@ def main() -> int:
     reachable = ping(settings)
     print(f"[diag]     {settings.opensearch_url} reachable={reachable}", flush=True)
     if not reachable:
-        print("[diag] OpenSearch unreachable; run `docker compose up -d`", flush=True)
+        print("[diag] OpenSearch unreachable; run `podman compose up -d`", flush=True)
         return 1
     ok(t)
 

@@ -465,6 +465,7 @@ def _payload_matches(source: dict[str, Any], filters: dict[str, Any]) -> bool:
 if os.environ.get("VVS_OPENSEARCH_STRICT_PING"):  # pragma: no cover - opt-in diagnostic
     if not ping():
         raise SystemExit(
-            "Cannot reach OpenSearch. Run `docker compose up -d` "
-            "(see docker-compose.yml) or set VVS_OPENSEARCH_URL."
+            "Cannot reach OpenSearch. Run `podman compose up -d` "
+            "(or `docker compose up -d`; see docker-compose.yml) "
+            "or set VVS_OPENSEARCH_URL."
         )

@@ -345,7 +345,7 @@ Picture path and spoken path **compete**, they are not summed. BGE-small cosine 
 
 **OpenSearch k-NN is the only ANN here, not BM25.** Every payload field (`path`, `t_s`, `modality`, `text`, `shot_id`, `motion_energy`, `flash_energy`) lives on the same document as its `knn_vector`, so there is no separate payload store to keep in sync. Lexical ranking and the motion/flash boost still run in Python on the ANN candidates only — OpenSearch's BM25 engine is available on these text fields but intentionally unused (see the `opensearch_store.py` module docstring for why: adopting it would fuse visual and text scores server-side, discarding the per-channel ranks the RRF fusion below depends on). If k-NN never retrieved the row, those boosts never see it.
 
-**`VectorStore` and OpenSearch.** The app talks only to a `VectorStore` (`create`, `add`, `search`, `close`) — see `retrieve/store.py`. `OpenSearchStore` (`retrieve/opensearch_store.py`) is the only implementation: two shared indexes, `vvs_visual` and `vvs_text`, across the whole archive, each row tagged with `video_id`. `docker compose up -d` runs a single local node; `docs/CONFLUENCE_ONPREM.md` §6–8 covers the sharded-cluster version of the same document shape.
+**`VectorStore` and OpenSearch.** The app talks only to a `VectorStore` (`create`, `add`, `search`, `close`) — see `retrieve/store.py`. `OpenSearchStore` (`retrieve/opensearch_store.py`) is the only implementation: two shared indexes, `vvs_visual` and `vvs_text`, across the whole archive, each row tagged with `video_id`. `podman compose up -d` runs a single local node; `docs/CONFLUENCE_ONPREM.md` §6–8 covers the sharded-cluster version of the same document shape.
 
 **Query expansion.** Qwen-VL's dual encoder is lexically brittle: “river” and
 “running water” can land in noticeably different places in embedding space
@@ -394,10 +394,30 @@ TransNetV2 is **shot-boundary** detection (cuts / fades), not semantic “this i
 ```bash
 cd video-voice-search
 uv sync
-docker compose up -d   # starts a local single-node OpenSearch on :9200
+podman compose up -d   # starts a local single-node OpenSearch on :9200
 ```
 
-Needs Python 3.12+, `uv`, Docker, ~8 GB RAM (Qwen-VL embedding 2B is heavier than CLIP; Instruct captioning loads a second 2B VL). First run needs network for Qwen-VL Embedding / BGE / RapidOCR, plus Whisper (if audio), TransNetV2, and Qwen3-VL-Instruct (or BLIP) if captions are on. After that, query is offline (OpenSearch itself needs no network once its image is pulled). CLIP indexes built before the Qwen-VL swap still search; new analyzes use Qwen-VL. `VVS_OPENSEARCH_URL` points at a different instance if you're not running the bundled compose file.
+`docker compose up -d` runs the same file unchanged; the image is fully
+qualified as `docker.io/...` precisely so both resolve it. Two things are
+specific to rootless podman, neither of them fatal:
+
+- `podman compose` delegates to a Compose binary over podman's API socket, so
+  the socket has to be up: `systemctl --user enable --now podman.socket`.
+  Without it you get "failed to connect to the docker API at
+  unix:///run/user/1000/podman/podman.sock".
+- Rootless containers cannot raise `memlock` above your own hard limit, so
+  OpenSearch logs `Unable to lock JVM Memory` and `memory locking requested
+  ... but memory is not locked`, then starts regardless — `single-node` does
+  not enforce that bootstrap check. Harmless for a dev node holding a few
+  thousand vectors; set `bootstrap.memory_lock=false` in the compose file to
+  quieten it.
+
+Volumes are per-runtime, so podman will not see data written under Docker.
+Either move it across once (`tar` the volume out through a throwaway
+container and back in under the name `<project>_vvs-opensearch-data`) or
+re-run `scripts/reindex_local.py`.
+
+Needs Python 3.12+, `uv`, podman or Docker, ~8 GB RAM (Qwen-VL embedding 2B is heavier than CLIP; Instruct captioning loads a second 2B VL). First run needs network for Qwen-VL Embedding / BGE / RapidOCR, plus Whisper (if audio), TransNetV2, and Qwen3-VL-Instruct (or BLIP) if captions are on. After that, query is offline (OpenSearch itself needs no network once its image is pulled). CLIP indexes built before the Qwen-VL swap still search; new analyzes use Qwen-VL. `VVS_OPENSEARCH_URL` points at a different instance if you're not running the bundled compose file.
 
 ### Live demo UI
 
@@ -593,7 +613,7 @@ Commands: `uv run vvs index|query|app|warm|list`.
 | `VVS_SOURCE` / `VVS_VIDEO_ID` | Optional CLI / UI prefill |
 | `VVS_DATA_DIR` | Index root (default `data/`) |
 | `VVS_HOST` / `VVS_PORT` | Gradio bind (default `0.0.0.0:7860`) |
-| `VVS_OPENSEARCH_URL` | OpenSearch endpoint (default `http://localhost:9200`; `docker compose up -d` starts one) |
+| `VVS_OPENSEARCH_URL` | OpenSearch endpoint (default `http://localhost:9200`; `podman compose up -d` starts one) |
 | `VVS_OPENSEARCH_TIMEOUT_S` | Client request timeout (default `10`) |
 | `VVS_FORCE_MUTE` | Skip Whisper even if the file has audio |
 | `VVS_SCENE_CAPTION` | Caption visual scenes at analyze (X-Ray metadata) |

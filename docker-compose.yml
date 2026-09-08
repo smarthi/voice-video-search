@@ -1,6 +1,9 @@
 services:
   opensearch:
-    image: opensearchproject/opensearch:2.19.1
+    # Fully qualified on purpose: podman has no implicit docker.io, so a bare
+    # `opensearchproject/...` fails to resolve there. Docker accepts this form
+    # unchanged, so the file runs under either runtime.
+    image: docker.io/opensearchproject/opensearch:2.19.1
     container_name: vvs-opensearch
     environment:
       - discovery.type=single-node
@@ -15,6 +18,13 @@ services:
       # docs/CONFLUENCE_ONPREM.md.
       - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
     ulimits:
+      # Honoured under Docker and rootful podman. Rootless podman silently
+      # caps this at the invoking user's hard limit (64 MB here) rather than
+      # erroring, so OpenSearch logs "Unable to lock JVM Memory" and
+      # "memory locking requested ... but memory is not locked" and then
+      # starts anyway -- single-node does not enforce that bootstrap check.
+      # Harmless for a dev node; set bootstrap.memory_lock=false above to
+      # silence it.
       memlock:
         soft: -1
         hard: -1
