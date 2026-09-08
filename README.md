@@ -105,10 +105,47 @@ verifies that a wider batch has not moved the vectors (padded batched attention
 reorders fp16 reductions, so expect agreement around cosine 0.9996 — that is
 arithmetic, not a quality change).
 
-**Read that table as an upper bound: it loads the encoder alone.** A real index
-run also needs the 2B captioner, and each model wants ~5 GB in fp16, so on this
-8 GB card they cannot both be resident. Holding both does not fail cleanly — the
-allocator thrashes, flushing and re-reserving on nearly every call. Measured
+**Apple Silicon does not tell the same batch-width story.** Measured on an M3
+Max (128 GB unified memory, Qwen3-VL-Embedding-2B, 128 keyframes):
+
+| device | batch | s/frame | vs batch 1 |
+| --- | --- | --- | --- |
+| MPS, fp16 | 1 | 0.718 | 1.00× |
+| MPS, fp16 | 4 | 0.489 | 1.47× |
+| MPS, fp16 | 8 (default) | 0.516 | 1.39× |
+| MPS, fp16 | 16 | 0.563 | 1.28× |
+| MPS, fp16 | 32 | 0.579 | 1.24× |
+| MPS, fp16 | 64 | 0.569 | 1.26× |
+
+On CUDA, wider kept helping until the memory cliff. On MPS the win from
+batching is real but caps out well before that: batch 4 measured fastest here,
+8 is a close second, and 16+ is *slower* than 8, not just flatter — Apple's GPU
+does not have the raw throughput headroom to keep profiting from a wider batch
+the way a discrete card does, so past a small sweet spot the extra padding is
+pure overhead. Batch 4 beating the default by 6% is inside this script's own
+noise threshold for a 128-frame trial, so that alone is not a reason to change
+`VVS_VISUAL_BATCH` from 8 — but pushing it up to 32 or 64 expecting a CUDA-style
+continued win will make things slightly worse, not better. Peak memory reported
+flat at ~4.26 GB across every batch size here, unlike CUDA's climbing figures —
+`torch.mps` has no `max_memory_allocated`-style peak-since-reset counter the
+way CUDA does, so that column is really "resident size after the trial," not a
+true peak; do not read a memory-driven ceiling into it the way the CUDA numbers
+support one.
+
+Two processes sharing the GPU cost more here too, for a different reason than
+the memory story below: this sweep's own model load took over 8 minutes with
+a long-lived `vvs app` also holding the GPU, on a machine with far more
+unified memory than either process needs. It is not an OOM story on a big
+Mac — the single Metal command queue serializes across processes even when
+there is plenty of memory for both, so a slow *load*, not just a slow
+*forward pass*, is the symptom to watch for. Stop the UI before a benchmark
+or a batch reindex.
+
+**Read the CUDA table above as an upper bound: it loads the encoder alone.** A
+real index run also needs the 2B captioner, and each model wants ~5 GB in
+fp16, so on this 8 GB card they cannot both be resident. Holding both does
+not fail cleanly — the allocator thrashes, flushing and re-reserving on
+nearly every call. Measured
 across one 16-video reindex, the first video embedded at 0.33 s/frame and every
 video after its captioning stage ran at 7.8–9.9 s/frame, which is *slower than
 CPU* (4–6 s/frame). Two processes are worse still: a long-lived `vvs app` holding
