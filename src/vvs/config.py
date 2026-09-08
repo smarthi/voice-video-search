@@ -95,28 +95,6 @@ class Settings(BaseSettings):
         default=None,
         description="Frames per forward pass. Default 8 on GPU, 1 on CPU.",
     )
-    visual_embed_url: str | None = Field(
-        default=None,
-        description=(
-            "Base URL of the visual-embed service (services/visual_embed_server.py), "
-            "e.g. http://visual-embed:8001. Unset (default): embed in-process, as "
-            "before. Only the default Qwen3-VL-Embedding-2B encoder is proxied -- "
-            "wemm/clip stay local regardless of this setting."
-        ),
-    )
-    caption_service_url: str | None = Field(
-        default=None,
-        description=(
-            "Base URL of the caption service (services/caption_server.py), e.g. "
-            "http://caption:8002. Unset (default): caption and expand queries "
-            "in-process, as before. Only Qwen3-VL-2B-Instruct is proxied -- the "
-            "BLIP fallback stays local regardless of this setting."
-        ),
-    )
-    service_timeout_s: float = Field(
-        default=60.0,
-        description="HTTP timeout for calls to the visual-embed and caption services.",
-    )
 
 
 def load_settings(

@@ -657,80 +657,11 @@ src/vvs/
   ingest/     YouTube + local ingest
   media/      frames, shots (TransNetV2), motion/flash, clips, transcribe, ocr, scenes, caption
   retrieve/   embed, index, search, reembed, VectorStore (OpenSearch)
-  services/   optional FastAPI wrappers for the two 2B models -- see below
   ui/         Gradio + custom theme + library grid
 tests/        store / mute / shots / scenes / corpus / motion / library (no VLM download)
 ```
 
 Commands: `uv run vvs index|query|app|warm|list`.
-
-## Embedding services (optional)
-
-Everything above runs the visual encoder (Qwen3-VL-Embedding-2B) and the
-captioner (Qwen3-VL-2B-Instruct) in-process, loaded on first use exactly as
-`retrieve/embed.py` and `media/caption.py` always have. `src/vvs/services/`
-wraps each of those two models in its own FastAPI app instead, so they can be
-deployed as independent, separately-scaled services rather than living inside
-whichever process happens to call them.
-
-**Why these two, and not the others.** These are the only two models a
-process serving search needs to be *identical* to the process that built the
-index -- an old query embedded with different weights than the frames it is
-searching lands in the wrong part of the vector space. They are also the two
-models responsible for every GPU-contention bug this repo has actually hit:
-`vvs.device.should_evict()` and the `release_captioner()` /
-`release_visual_encoder()` calls in `retrieve/index.py` exist only because
-one process used to hold both 5 GB models on one card at once. A process
-that only ever loads one of them never needs to evict it for the other, so
-running them as separate services removes that whole class of bug rather
-than working around it. TransNetV2, RapidOCR, and Whisper stay in-process:
-they're index-time-only and single-consumer, so neither problem applies to
-them yet.
-
-**Run them directly** (needs the `services` extra: `fastapi`, `uvicorn`,
-`python-multipart` -- not installed by default, since the CLI and the UI
-never need a web framework):
-
-```bash
-uv sync --extra services
-uv run --extra services uvicorn vvs.services.visual_embed_server:app --port 8001 &
-uv run --extra services uvicorn vvs.services.caption_server:app --port 8002 &
-```
-
-**Or via Docker** (`docker/visual-embed.Dockerfile`, `docker/caption.Dockerfile`,
-wired into `docker-compose.yml` behind the `services` profile so plain
-`docker compose up -d` is unaffected):
-
-```bash
-docker compose --profile services up -d --build
-```
-
-These images are Linux-only by construction (Metal does not pass through
-Docker) -- CUDA on a box with the NVIDIA Container Toolkit, or CPU. Run the
-services directly with `uv run uvicorn` instead to use Apple Silicon's GPU.
-
-**Point the rest of the app at them:**
-
-```bash
-export VVS_VISUAL_EMBED_URL=http://localhost:8001
-export VVS_CAPTION_SERVICE_URL=http://localhost:8002
-uv run vvs index --source <video> --scene-caption
-uv run vvs query "a query" --video-id <id>
-```
-
-Leave both unset (the default) and nothing changes -- every call embeds and
-captions in-process exactly as before. Each endpoint's own module docstring
-(`retrieve/embed.py`'s `_remote_qwen_ok`, `media/caption.py`'s `caption_image`
-and `expand_query_terms`) explains the one safety rule: a call only proxies
-to the service when it would have resolved to the *default* Qwen weights
-locally too. An index built with `VVS_VISUAL_ENCODER=wemm`, `clip`, or a
-non-default `VVS_VISUAL_MODEL` (e.g. the 8B VL embedder) always embeds
-locally regardless of these settings, since the service only ever loads the
-one default model -- proxying a call that wanted different weights would
-silently land vectors in the wrong space rather than searching it correctly.
-A service failure never fails a search or an index run outright: query
-expansion degrades to the literal query, and captioning falls back to the
-same local Qwen → BLIP chain it already had.
 
 ## Environment
 
@@ -759,9 +690,6 @@ same local Qwen → BLIP chain it already had.
 | `VVS_SHOT_DEVICE` | Device for TransNetV2. Default: the shared device choice |
 | `VVS_MIN_RELEVANCE` | Absolute `corpus_relevance` floor below which a search reports no match. `0` always answers. Default: `2.7` |
 | `VVS_FAULTHANDLER` | `0` disables the C-level traceback on fatal signals |
-| `VVS_VISUAL_EMBED_URL` | Base URL of the visual-embed service (e.g. `http://localhost:8001`). Default unset: embed in-process. See [Embedding services](#embedding-services-optional) |
-| `VVS_CAPTION_SERVICE_URL` | Base URL of the caption service (e.g. `http://localhost:8002`). Default unset: caption/expand in-process. See [Embedding services](#embedding-services-optional) |
-| `VVS_SERVICE_TIMEOUT_S` | HTTP timeout for calls to either service above (default `60`) |
 
 Search weights live in `retrieve/search.py` (not env): per-video RRF (`TEXT_WEIGHT` 1.6, `OCR_WEIGHT` 0.6, `SCENE_WEIGHT` 1.0) and archive merge (`SCENE_ANN_WEIGHT` 1.15, `TEXT_ANN_WEIGHT` 1.4, `OCR_ANN_WEIGHT` 0.55, `LEXICAL_BLEND` 0.2, `MOTION_BLEND` 0.45). Motion/flash keep thresholds are in `media/motion.py` (`FLASH_KEEP` 0.22, `MOTION_KEEP` 0.18).
 
