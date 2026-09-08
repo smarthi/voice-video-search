@@ -98,9 +98,27 @@ def caption_scenes(
 def caption_image(path: str | Path, *, model_name: str | None = None) -> tuple[str, list[str], str]:
     """Return (caption, objects, model_id) for one still."""
     global _qwen_disabled
-    preferred = (model_name or load_settings().scene_caption_model or "qwen_vl").strip()
-    image = _open_fit(path)
+    settings = load_settings()
+    preferred = (model_name or settings.scene_caption_model or "qwen_vl").strip()
     key = preferred.lower().replace("_", "-")
+    if _want_qwen(key) and settings.caption_service_url and _qwen_disabled is None:
+        # The caption service only ever loads Qwen3-VL-2B-Instruct, so this
+        # is only safe when qwen was already what caption_image would have
+        # loaded locally -- a BLIP preference still runs local, below.
+        from vvs.media.caption_client import CaptionServiceError, remote_caption_image
+
+        try:
+            return remote_caption_image(
+                path, settings.caption_service_url, timeout_s=settings.service_timeout_s
+            )
+        except CaptionServiceError as exc:
+            # Same resilience contract as a local Qwen failure: one bad
+            # caption call must not fail the whole index. Falls through to
+            # local Qwen (if reachable) or BLIP below, not straight to BLIP,
+            # since a transient service hiccup should not disable the
+            # in-process Qwen path this run never actually tried.
+            print(f"[caption] caption service failed ({exc}); trying this frame locally")
+    image = _open_fit(path)
     if _want_qwen(key) and _qwen_disabled is None:
         try:
             return _qwen_caption(image)
@@ -250,6 +268,24 @@ def expand_query_terms(query: str, *, max_variants: int | None = None) -> list[s
     n = max_variants if max_variants is not None else settings.query_expand_variants
     if n <= 0:
         return []
+    if settings.caption_service_url:
+        from vvs.media.caption_client import CaptionServiceError, remote_expand_query_terms
+
+        try:
+            return remote_expand_query_terms(
+                query,
+                settings.caption_service_url,
+                max_variants=n,
+                timeout_s=settings.service_timeout_s,
+            )
+        except CaptionServiceError as exc:
+            # A search must not fail because the caption service hiccuped --
+            # searching the literal query only is always a safe degradation,
+            # so this does not fall through to the local model the way
+            # caption_image's failure path does; it just skips expansion
+            # for this one query.
+            print(f"[query] expansion service failed ({exc}); searching the literal query only")
+            return []
     try:
         decoded = _qwen_rewrite(_EXPAND_PROMPT.format(query=query, n=n))
     except Exception as exc:

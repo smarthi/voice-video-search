@@ -10,6 +10,7 @@ dependencies = [
     "einops>=0.8.0",
     "faster-whisper>=1.1.1",
     "gradio>=5.29.0",
+    "httpx>=0.27.0",
     "imageio-ffmpeg>=0.5.1",
     "numpy>=2.2.0",
     "open-clip-torch>=2.32.0",
@@ -28,6 +29,11 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["ruff>=0.11.0"]
+# Only the two model services (src/vvs/services/) import these. The CLI, the
+# Gradio UI, and build_index/search never need a web framework, so this stays
+# out of the core dependency list -- installed only on an image that runs
+# `uvicorn vvs.services.<x>:app`.
+services = ["fastapi>=0.115.0", "uvicorn[standard]>=0.32.0", "python-multipart>=0.0.9"]
 
 [project.scripts]
 vvs = "vvs.cli:main"

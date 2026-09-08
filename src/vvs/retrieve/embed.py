@@ -389,9 +389,16 @@ def embed_clip_images(
     kind = encoder_kind(meta=meta, settings=cfg)
     if kind == "clip":
         return _embed_clip_images(paths, batch_size=batch_size or 16)
-    vl_batch = batch_size or default_image_batch()
     if kind == "wemm":
+        vl_batch = batch_size or default_image_batch()
         return _embed_wemm_images(paths, batch_size=vl_batch, meta=meta, settings=cfg)
+    if _remote_qwen_ok(meta=meta, settings=cfg):
+        from vvs.retrieve.embed_client import remote_embed_images
+
+        return remote_embed_images(
+            paths, cfg.visual_embed_url, timeout_s=cfg.service_timeout_s
+        )
+    vl_batch = batch_size or default_image_batch()
     return _embed_qwen_images(paths, batch_size=vl_batch, meta=meta, settings=cfg)
 
 
@@ -406,7 +413,26 @@ def embed_clip_texts(texts: list[str], *, meta=None, settings=None) -> np.ndarra
         return _embed_clip_texts(texts)
     if kind == "wemm":
         return _embed_wemm_texts(texts, meta=meta, settings=cfg)
+    if _remote_qwen_ok(meta=meta, settings=cfg):
+        from vvs.retrieve.embed_client import remote_embed_texts
+
+        return remote_embed_texts(texts, cfg.visual_embed_url, timeout_s=cfg.service_timeout_s)
     return _embed_qwen_texts(texts, meta=meta, settings=cfg)
+
+
+def _remote_qwen_ok(*, meta=None, settings=None) -> bool:
+    """Whether to proxy this qwen_vl call to the visual-embed service.
+
+    The service only ever loads the default QWEN_VL_2B weights, so a call
+    is only safe to proxy when that is also what this call would have
+    resolved to locally -- an index built against QWEN_VL_8B (or any other
+    override) still has to embed locally, or its query vectors would land
+    in the wrong space entirely.
+    """
+    cfg = settings or load_settings()
+    if not cfg.visual_embed_url:
+        return False
+    return _model_id_for(meta=meta, settings=cfg) == QWEN_VL_2B
 
 
 def _embed_clip_images(paths: list[str] | list[Path], batch_size: int) -> np.ndarray:
