@@ -398,19 +398,37 @@ podman compose up -d   # starts a local single-node OpenSearch on :9200
 ```
 
 `docker compose up -d` runs the same file unchanged; the image is fully
-qualified as `docker.io/...` precisely so both resolve it. Two things are
-specific to rootless podman, neither of them fatal:
+qualified as `docker.io/...` precisely so both resolve it.
 
-- `podman compose` delegates to a Compose binary over podman's API socket, so
-  the socket has to be up: `systemctl --user enable --now podman.socket`.
-  Without it you get "failed to connect to the docker API at
-  unix:///run/user/1000/podman/podman.sock".
-- Rootless containers cannot raise `memlock` above your own hard limit, so
-  OpenSearch logs `Unable to lock JVM Memory` and `memory locking requested
-  ... but memory is not locked`, then starts regardless — `single-node` does
-  not enforce that bootstrap check. Harmless for a dev node holding a few
-  thousand vectors; set `bootstrap.memory_lock=false` in the compose file to
-  quieten it.
+`podman compose` does not implement Compose itself, it hands off to a
+provider, and which one you get decides what else you need installed. Its
+default order tries `docker-compose` first — fine if Docker is around, but on
+a machine where that binary belongs to Docker Desktop it vanishes with it.
+Pin the provider instead, in `~/.config/containers/containers.conf`:
+
+```toml
+[engine]
+compose_providers = ["/home/you/.local/bin/podman-compose"]
+```
+
+Install it without root via `uv tool install podman-compose`. Use an absolute
+path: podman resolves providers through `PATH`, and `~/.local/bin` is not on
+it for every shell. With this provider nothing Docker-related is needed —
+`podman-compose` drives the `podman` CLI directly, so podman's
+Docker-compatible API socket can stay stopped. Via the `docker-compose`
+provider that socket *is* required (`systemctl --user enable --now
+podman.socket`), or you get "failed to connect to the docker API at
+unix:///run/user/1000/podman/podman.sock". Note that `podman-compose` also
+groups the service into a pod (`pod_<project>`), which `docker-compose` does
+not; harmless, but it is why `podman pod ls` is non-empty.
+
+One rootless behaviour is worth knowing and is not fatal. A rootless
+container cannot raise `memlock` above your own hard limit, and it caps it
+silently rather than erroring, so OpenSearch logs `Unable to lock JVM Memory`
+and `memory locking requested ... but memory is not locked` and then starts
+regardless — `single-node` does not enforce that bootstrap check. Harmless
+for a dev node holding a few thousand vectors; set
+`bootstrap.memory_lock=false` in the compose file to quieten it.
 
 Volumes are per-runtime, so podman will not see data written under Docker.
 Either move it across once (`tar` the volume out through a throwaway
