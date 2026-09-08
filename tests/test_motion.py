@@ -105,12 +105,7 @@ def test_tiny_gray_from_pil() -> None:
 
 
 if __name__ == "__main__":
-    test_pair_energy_still_vs_flash()
-    test_tiny_gray_from_rgb()
-    test_should_keep_flash_and_motion()
-    test_query_motion_flags()
-    test_flash_peaks_and_energy_at()
-    test_energies_from_rgb_stack()
-    test_merge_flash_reps()
-    test_tiny_gray_from_pil()
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
     print("ok")
