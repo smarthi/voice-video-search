@@ -221,6 +221,29 @@ def test_generation_scopes_reads_and_rebuild_cleanup() -> None:
         _drop_index(index)
 
 
+def test_app_checks_opensearch_before_warming_models() -> None:
+    """The reachability check has to sit above the warm, not below it.
+
+    `launch` loads three models before it first touches OpenSearch (via
+    `list_indexed`), which measured 2m44s on the CUDA box. With the node down
+    that ordering reported a refused connection only after all of it, so the
+    real cause -- a container left in Created by a reboot -- read as the app
+    hanging. Ordering is the whole fix, hence a source check: calling `launch`
+    for real would warm the models this is about.
+    """
+    import inspect
+
+    from vvs.ui import app
+
+    src = inspect.getsource(app.launch)
+    assert src.index("ping(settings)") < src.index("warm_models"), (
+        "the OpenSearch check must precede the model warm"
+    )
+    # A bare "connection refused" is what made this hard to place; the message
+    # has to name the fix.
+    assert "podman compose up -d" in src
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

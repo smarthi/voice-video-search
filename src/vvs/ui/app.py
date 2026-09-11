@@ -27,6 +27,7 @@ from vvs.retrieve.index import (
     load_index,
     load_timings,
 )
+from vvs.retrieve.opensearch_store import ping
 from vvs.retrieve.search import fmt_clock, fmt_confidence, fmt_time, search_corpus
 from vvs.ui.library import (
     SORT_CHOICES,
@@ -81,6 +82,20 @@ def launch(
     server_port: int | None = None,
 ) -> None:
     settings = load_settings(source=source, video_id=video_id)
+
+    # Checked here, before the warm below, because the first OpenSearch call is
+    # further down still (list_indexed) and the warm sits between them costing
+    # minutes. A stopped container used to mean waiting out three model loads
+    # to be told, obscurely, that a connection was refused. The usual cause is
+    # a reboot: rootless podman leaves containers in Created unless
+    # podman-restart.service is enabled for the user.
+    if not ping(settings):
+        raise SystemExit(
+            f"[app] cannot reach OpenSearch at {settings.opensearch_url}\n"
+            "  podman compose up -d   # start it (podman ps -a shows Created/Exited when stopped)\n"
+            "  VVS_OPENSEARCH_URL=... # or point somewhere else"
+        )
+
     prefill = settings.source or settings.video_id or ""
     video_id_override = settings.video_id
     analyze_rebuild = rebuild

@@ -5,6 +5,15 @@ services:
     # unchanged, so the file runs under either runtime.
     image: docker.io/opensearchproject/opensearch:2.19.1
     container_name: vvs-opensearch
+    # Without this a reboot leaves the container in Created and the app cannot
+    # reach :9200. `always` rather than the more usual `unless-stopped`: under
+    # rootless podman the policy does nothing on its own, it is acted on by
+    # podman-restart.service, and that unit runs
+    # `podman start --all --filter restart-policy=always` -- which
+    # unless-stopped does not match, so it would be silently ignored at boot.
+    # The unit also has to be enabled for the user and needs lingering on to
+    # run at boot at all. See the README.
+    restart: always
     environment:
       - discovery.type=single-node
       - plugins.security.disabled=true

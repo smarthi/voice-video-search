@@ -422,6 +422,34 @@ unix:///run/user/1000/podman/podman.sock". Note that `podman-compose` also
 groups the service into a pod (`pod_<project>`), which `docker-compose` does
 not; harmless, but it is why `podman pod ls` is non-empty.
 
+Containers do not come back by themselves after a reboot, and the compose
+`restart:` key alone does not change that under rootless podman — nothing is
+watching to act on it. A stopped node shows up as the app failing to start,
+since `vvs app` refuses to run without OpenSearch. Three things have to line
+up, and it is worth doing all three at once because any one missing looks
+identical:
+
+```bash
+systemctl --user enable podman-restart.service   # the thing that acts on restart:
+loginctl enable-linger "$USER"                   # lets user units run at boot, no login
+podman compose down && podman compose up -d      # recreate so the policy sticks
+```
+
+The compose file asks for `restart: always`, not the more usual
+`unless-stopped`, and that detail matters: `podman-restart.service` runs
+`podman start --all --filter restart-policy=always`, which `unless-stopped`
+does not match. Set it and the container is quietly skipped at boot, with the
+policy looking correct in `podman inspect` the whole time. The tradeoff is
+that `always` also restarts a container you deliberately stopped, which for a
+dev database is what you want anyway. Check it without rebooting:
+
+```bash
+podman ps -a --filter restart-policy=always     # must list vvs-opensearch
+podman stop vvs-opensearch
+systemctl --user restart podman-restart.service # what fires at boot
+podman ps                                       # back up
+```
+
 One rootless behaviour is worth knowing and is not fatal. A rootless
 container cannot raise `memlock` above your own hard limit, and it caps it
 silently rather than erroring, so OpenSearch logs `Unable to lock JVM Memory`
