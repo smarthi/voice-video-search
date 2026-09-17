@@ -377,6 +377,17 @@ Mute video: visual + OCR + scene. No time-anchor boosts.
 
 That table is **inside one video**. The UI confidence badge is RRF / ceiling. Archive order uses `corpus_relevance` above, not that badge. Examples: `robotics` → interview clip ~3:01; `clips with a trumpet` → Careless Whisper / Jennifer Connelly saxophone still; `snow-covered mountains` → Roja; `moving tornado` prefers the high-motion still of the same funnel.
 
+**Saying there is no match.** k-NN always returns its k nearest rows, so ranking alone can never report an absent subject — a query for something simply not in the archive used to come back with confident-looking stills of whatever was least unlike it, indistinguishable on screen from a real answer. `drop_weak_hits` applies an absolute floor on `corpus_relevance`, and the UI shows *No matching content found* when nothing clears it.
+
+The floor is measured, not picked. Over 21 videos, ten queries written from what is actually in the archive against ten for things plainly absent from it:
+
+| | min | mean | max |
+|---|---|---|---|
+| genuine match | 2.940 | 3.339 | 4.133 |
+| nothing to match | 2.014 | 2.290 | 2.545 |
+
+`MIN_RELEVANCE = 2.7` sits in that gap with roughly 0.2 of headroom either side, and separates all twenty. Worth noting *why* the gap exists: on a nonsense query the visual channel still scores 1.25–1.42 and the caption channel 1.75–2.13, so neither channel alone would separate anything — it is their combination through `corpus_relevance` that does. The floor also trims weak tail hits inside an otherwise good result set, so a strong query can legitimately return fewer than `top_k` (`waterfall in a mossy forest` returns one). `VVS_MIN_RELEVANCE=0` restores the old always-answer behaviour. The number is calibrated on this archive's shape and wants re-measuring on a corpus of a different one.
+
 **X-Ray scene cards.** The visual embedder does not write English. When captions are on, stills are grouped (TransNet shots if present, else embedding cosine / dHash, 24 s cap). **Qwen3-VL-2B-Instruct** captions the representative still and lists objects (`VVS_SCENE_CAPTION_MODEL=qwen_vl`). That is a second checkpoint from the embedder — Instruct generates text; Embedding only writes vectors. **BLIP-base** is the fallback if Instruct fails, and the run falls back **once** rather than once per scene. Cards live in `meta.json` and are BGE-embedded as `modality="scene"`. Query time only does a playhead lookup plus ANN — the captioner does not run again.
 
 Captioning uses the same device and precision as the embedder (see **Device** above), which matters more here than anywhere else: captioning is autoregressive, so each scene costs up to `QWEN_MAX_TOKENS` sequential forward passes rather than the single pass an embedding needs. If a caption model fails to load on the GPU, the session pins itself to CPU exactly as the encoder does.
@@ -677,6 +688,7 @@ Commands: `uv run vvs index|query|app|warm|list`.
 | `VVS_VISUAL_BATCH` | Frames per forward pass. Default 8 on GPU, 1 on CPU. Measure with `scripts/bench_batch.py` |
 | `VVS_EVICT_MODELS` | `1` / `0` to force unloading one 2B model before loading the other. Default: on below 16 GB of device memory |
 | `VVS_SHOT_DEVICE` | Device for TransNetV2. Default: the shared device choice |
+| `VVS_MIN_RELEVANCE` | Absolute `corpus_relevance` floor below which a search reports no match. `0` always answers. Default: `2.7` |
 | `VVS_FAULTHANDLER` | `0` disables the C-level traceback on fatal signals |
 
 Search weights live in `retrieve/search.py` (not env): per-video RRF (`TEXT_WEIGHT` 1.6, `OCR_WEIGHT` 0.6, `SCENE_WEIGHT` 1.0) and archive merge (`SCENE_ANN_WEIGHT` 1.15, `TEXT_ANN_WEIGHT` 1.4, `OCR_ANN_WEIGHT` 0.55, `LEXICAL_BLEND` 0.2, `MOTION_BLEND` 0.45). Motion/flash keep thresholds are in `media/motion.py` (`FLASH_KEEP` 0.22, `MOTION_KEEP` 0.18).

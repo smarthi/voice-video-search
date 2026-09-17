@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 
 import numpy as np
 
@@ -16,7 +17,15 @@ from vvs.models import (
     TranscriptSegment,
 )
 from vvs.retrieve.store import StoreHit, VectorPayload
-from vvs.retrieve.search import corpus_relevance, merge_corpus_hits, search_corpus
+from vvs.retrieve.search import (
+    MIN_RELEVANCE,
+    corpus_relevance,
+    drop_weak_hits,
+    format_hits,
+    merge_corpus_hits,
+    min_relevance,
+    search_corpus,
+)
 
 # `import vvs.retrieve.search as search_module` would silently bind the
 # *function* vvs.retrieve.search (re-exported by vvs/retrieve/__init__.py's
@@ -79,6 +88,54 @@ def test_merge_single_video_passthrough() -> None:
 
 def test_empty_query_is_empty() -> None:
     assert search_corpus("   ", ["a", "b"]) == []
+
+
+def test_a_query_with_nothing_to_match_returns_nothing() -> None:
+    """k-NN always has k rows to give back; only the floor can say "no".
+
+    Scores here are the measured shape of a nonsense query against the real
+    archive -- visual ~1.4, caption ~2.1, no lexical overlap -- which sums to
+    well under the floor.
+    """
+    noise = [
+        _hit("a", i, 0.9, visual_score=1.40, scene_score=1.85, scene_caption="a harvested field")
+        for i in range(1, 7)
+    ]
+    assert drop_weak_hits(noise, "playing a xylophone") == []
+
+
+def test_a_real_match_is_kept() -> None:
+    """The other half of the same threshold: 2.94 was the weakest true match."""
+    good = [
+        _hit("a", 1, 0.9, visual_score=1.63, scene_score=2.49, scene_caption="a waterfall")
+    ]
+    kept = drop_weak_hits(good, "waterfall in a mossy forest")
+    assert len(kept) == 1
+    assert kept[0].rank == 1
+
+
+def test_surviving_hits_are_renumbered() -> None:
+    """Ranks are positional, so dropping rank 1 must not leave a gap at the top."""
+    hits = [
+        _hit("a", 1, 0.9, visual_score=1.30, scene_score=1.80),  # below
+        _hit("b", 2, 0.8, visual_score=1.70, scene_score=2.90, scene_caption="a glacier"),
+    ]
+    kept = drop_weak_hits(hits, "blue glacier in the mountains")
+    assert [hit.video_id for hit in kept] == ["b"]
+    assert [hit.rank for hit in kept] == [1]
+
+
+def test_the_floor_can_be_overridden(monkeypatch) -> None:
+    """VVS_MIN_RELEVANCE=0 restores answering with whatever was least unlike it."""
+    noise = [_hit("a", 1, 0.9, visual_score=1.40, scene_score=1.85)]
+    monkeypatch.setenv("VVS_MIN_RELEVANCE", "0")
+    assert len(drop_weak_hits(noise, "playing a xylophone")) == 1
+    monkeypatch.setenv("VVS_MIN_RELEVANCE", "not-a-number")
+    assert min_relevance() == MIN_RELEVANCE
+
+
+def test_no_hits_reads_as_a_sentence_not_an_empty_string() -> None:
+    assert format_hits([]) == "No matching content found."
 
 
 def test_corpus_reuses_query_embeddings_per_encoder_family(monkeypatch) -> None:
@@ -684,16 +741,31 @@ if __name__ == "__main__":
     # parameter (like test_corpus_reuses_query_embeddings_per_encoder_family
     # below) would silently never execute under that runner.
     class _Monkeypatch:
+        """Enough of pytest's fixture to run this file as a script."""
+
         def __init__(self) -> None:
-            self._saved: list[tuple[object, str, object]] = []
+            self._undo: list = []
 
         def setattr(self, target, name, value) -> None:
-            self._saved.append((target, name, getattr(target, name)))
+            old = getattr(target, name)
+            self._undo.append(lambda: setattr(target, name, old))
             setattr(target, name, value)
 
+        def setenv(self, name, value) -> None:
+            old = os.environ.get(name)
+
+            def restore() -> None:
+                if old is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = old
+
+            self._undo.append(restore)
+            os.environ[name] = str(value)
+
         def undo(self) -> None:
-            for target, name, value in reversed(self._saved):
-                setattr(target, name, value)
+            for restore in reversed(self._undo):
+                restore()
 
     for _name, _fn in sorted(globals().items()):
         if _name.startswith("test_") and isinstance(_fn, types.FunctionType):

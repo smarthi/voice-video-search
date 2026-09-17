@@ -50,6 +50,7 @@ _BUNDLES: dict[str, dict[str, Any]] = {}
 _STAGE_UI: dict[str, tuple[float, str]] = {
     "ingest": (0.08, "Ingesting video (download or copy)…"),
     "frames": (0.22, "Extracting keyframes…"),
+    "matte": (0.30, "Neutralising the projection matte…"),
     "shots": (0.22, "Detecting shots (TransNetV2)…"),
     "asr": (0.42, "Transcribing with Whisper…"),
     "asr_skip": (0.42, "No audio track — skipping Whisper (visual + OCR)…"),
@@ -142,6 +143,16 @@ def launch(
         started = time.perf_counter()
         hits = search_corpus(query, ids, top_k=6, loaded=_BUNDLES)
         search_ms = (time.perf_counter() - started) * 1000
+        if not hits:
+            # k-NN always has k nearest rows to give back, so before the
+            # relevance floor an absent subject returned stills of whatever was
+            # least unlike it -- indistinguishable, on screen, from a real
+            # answer. Say nothing was found instead.
+            where = f"in {scope_id}" if scope_id else f"across {archive_size} videos"
+            return _idle_outputs(
+                f"No matching content found for “{query}” {where}"
+                f"  ·  search {search_ms:.0f} ms"
+            )
         metas = _corpus_metas()
         clip_started = time.perf_counter()
         try:

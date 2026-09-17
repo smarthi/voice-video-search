@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 import re
 from typing import Any
 
@@ -32,6 +33,26 @@ MOTION_BLEND = 0.45
 MOTION_RRF_WEIGHT = 2.5
 ANN_OVERFETCH = 48
 LEXICAL_WEIGHT = 0.14
+# Below this `corpus_relevance`, a hit is the archive's noise floor rather than
+# an answer, and showing it is worse than admitting there is no match: ANN
+# always returns its k nearest rows, so without a floor a query for something
+# simply absent comes back with confident-looking stills of whatever was least
+# unlike it.
+#
+# Measured over 21 videos, 10 queries written from what is actually in the
+# archive against 10 for things plainly absent from it:
+#
+#   genuine match      min 2.940   mean 3.339   max 4.133
+#   nothing to match   min 2.014   mean 2.290   max 2.545
+#
+# 2.7 sits in that gap with ~0.2 of headroom either side. Note what the
+# channel breakdown says about why the gap exists: on a nonsense query the
+# visual channel still returns 1.25-1.42 and the caption channel 1.75-2.13,
+# so neither alone would separate -- it is their sum, through
+# corpus_relevance, that does. The number is calibrated on this archive and
+# would want re-measuring on a corpus of a different shape, hence the
+# override rather than a bare constant.
+MIN_RELEVANCE = 2.7
 # idf is computed against *this one video's* own scene/ocr/transcript text,
 # whose size ranges from ~8 documents (a short clip) to 80+ (a long
 # conference talk) archive-wide. A term that occurs exactly once gets a
@@ -343,7 +364,8 @@ def search_corpus(
             )
         except Exception as exc:
             print(f"[search] skip {vid}: {exc}")
-    return merge_corpus_hits(groups, top_k=top_k, query=query)
+    merged = merge_corpus_hits(groups, top_k=top_k, query=query)
+    return drop_weak_hits(merged, query)
 
 
 def corpus_relevance(hit: Hit, query: str = "") -> float:
@@ -398,6 +420,39 @@ def corpus_relevance(hit: Hit, query: str = "") -> float:
     )
 
 
+def min_relevance() -> float:
+    """The relevance floor, with a `VVS_MIN_RELEVANCE` override.
+
+    Read per call rather than at import so it can be changed in a session and
+    set to 0 to get the old behaviour of always answering with something.
+    """
+    raw = os.environ.get("VVS_MIN_RELEVANCE")
+    if raw is None:
+        return MIN_RELEVANCE
+    try:
+        return float(raw)
+    except ValueError:
+        print(f"[search] ignoring VVS_MIN_RELEVANCE={raw!r}, not a number")
+        return MIN_RELEVANCE
+
+
+def drop_weak_hits(hits: list[Hit], query: str = "", *, floor: float | None = None) -> list[Hit]:
+    """Keep only hits that clear the relevance floor, so "nothing" can be said.
+
+    Applied to whole result sets at the two entry points a person actually
+    calls, not inside `search`, which stays a scorer that `search_corpus`
+    composes over every video before anything is thrown away.
+    """
+    cut = min_relevance() if floor is None else floor
+    if cut <= 0:
+        return hits
+    kept = [hit for hit in hits if corpus_relevance(hit, query) >= cut]
+    if not kept and hits:
+        best = max(corpus_relevance(hit, query) for hit in hits)
+        print(f"[search] no match for {query!r}: best relevance {best:.3f} < {cut:.3f}")
+    return [_with_rank(hit, rank) for rank, hit in enumerate(kept, start=1)]
+
+
 def merge_corpus_hits(
     groups: list[list[Hit]], *, top_k: int, query: str = ""
 ) -> list[Hit]:
@@ -427,6 +482,10 @@ def _with_rank(hit: Hit, rank: int) -> Hit:
 
 
 def format_hits(hits: list[Hit]) -> str:
+    if not hits:
+        # An empty string used to be the whole answer here, which read as the
+        # command having silently done nothing.
+        return "No matching content found."
     lines = []
     for hit in hits:
         if hit.clip_start_s is not None and hit.clip_end_s is not None:

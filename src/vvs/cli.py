@@ -19,7 +19,7 @@ from vvs.retrieve.index import (
     list_indexed,
     load_index,
 )
-from vvs.retrieve.search import format_hits, search, search_corpus
+from vvs.retrieve.search import drop_weak_hits, format_hits, search, search_corpus
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -115,7 +115,9 @@ def main(argv: list[str] | None = None) -> None:
         pin = bool(settings.video_id or settings.source) and not args.all
         if pin:
             vid = ensure_index(settings.source, settings.video_id)
-            hits = search(vid, query, top_k=args.top_k)
+            # search_corpus applies the floor itself; this branch calls the
+            # scorer directly, so it has to ask.
+            hits = drop_weak_hits(search(vid, query, top_k=args.top_k), query)
             meta = load_index(vid)["meta"]
             playable = attach_clips(
                 vid,
@@ -136,7 +138,7 @@ def main(argv: list[str] | None = None) -> None:
         if args.json:
             print(json.dumps([h.model_dump() for h in hits], indent=2))
         else:
-            print(format_hits(hits) or "No hits.")
+            print(format_hits(hits))
         return
     if args.cmd == "app":
         from vvs.ui.app import launch
