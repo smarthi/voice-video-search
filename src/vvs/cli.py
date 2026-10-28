@@ -84,7 +84,7 @@ def main(argv: list[str] | None = None) -> None:
         metavar=("BASELINE_ID", "SHOTS_ID"),
         help="Compare visual embedding counts (2fps id vs TransNetV2 id)",
     )
-    p_warm = sub.add_parser("warm", help="Preload visual encoder, BGE, and Whisper")
+    p_warm = sub.add_parser("warm", help="Preload EmbeddingGemma, the captioner, and Whisper")
     _ = p_list
     _ = p_warm
 

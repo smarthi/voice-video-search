@@ -21,8 +21,12 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 7860
     opensearch_url: str = Field(
-        default="http://localhost:9200",
-        description="OpenSearch endpoint. `podman compose up -d` starts one locally.",
+        default="http://localhost:9210",
+        description=(
+            "OpenSearch endpoint. `podman compose up -d opensearch-gemma` starts "
+            "the EmbeddingGemma node on :9210. :9200 is the older BGE/Qwen cluster "
+            "and cannot store these 768-d vectors."
+        ),
     )
     opensearch_timeout_s: float = Field(
         default=10.0,
@@ -37,13 +41,13 @@ class Settings(BaseSettings):
         description="Caption visual scenes with a VLM and store X-Ray metadata.",
     )
     scene_caption_model: str = Field(
-        default="qwen_vl",
-        description="qwen_vl (Qwen3-VL-2B-Instruct) or blip.",
+        default="gemma4",
+        description="gemma4 (google/gemma-4-E4B-it) or blip.",
     )
     query_expand: bool = Field(
         default=True,
         description=(
-            "Rewrite the query into a few alternate phrasings (Qwen3-VL-2B-Instruct, "
+            "Rewrite the query into a few alternate phrasings (Gemma 4 E4B, "
             "text-only) before embedding, so a synonym gap ('river' vs 'running water') "
             "doesn't cost a whole ANN pass. Adds one LLM call per search; set "
             "VVS_QUERY_EXPAND=0 to skip it and search the literal query only."
@@ -63,22 +67,27 @@ class Settings(BaseSettings):
         description="Inside a long shot, keep a still every N seconds.",
     )
     visual_encoder: str = Field(
-        default="qwen_vl",
+        default="embeddinggemma",
         description=(
+            "embeddinggemma (google/embeddinggemma-2, text and video frames), "
             "qwen_vl (Qwen3-VL-Embedding), wemm (tencent/WeMM-Embedding), "
             "or clip (open_clip ViT-B-32)."
         ),
     )
     visual_model: str = Field(
-        default="Qwen/Qwen3-VL-Embedding-2B",
-        description="HF id. qwen-vl-emb-4B aliases to the official 2B VL embedder.",
+        default="google/embeddinggemma-2",
+        description=(
+            "HF id. embeddinggemma2 aliases to google/embeddinggemma-2. "
+            "qwen-vl-emb-4B aliases to the official 2B VL embedder."
+        ),
     )
     visual_truncate_dim: int | None = Field(
         default=None,
         description=(
-            "Matryoshka output width for WeMM (64/128/256/512/1024/native). "
-            "256 keeps ~98.7% of MMEB-v2 image and video score at 8x less index. "
-            "Ignored by encoders that are not Matryoshka-trained."
+            "Matryoshka output width. EmbeddingGemma 2: 128/256/512/768. "
+            "WeMM: 64/128/256/512/1024/native. "
+            "Ignored by encoders that are not Matryoshka-trained. "
+            "When EmbeddingGemma is the text encoder, the text index uses this width too."
         ),
     )
     # Read from the environment inside retrieve.embed (which has torch) rather

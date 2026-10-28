@@ -56,12 +56,12 @@ _STAGE_UI: dict[str, tuple[float, str]] = {
     "asr_skip": (0.42, "No audio track — skipping Whisper (visual + OCR)…"),
     "ocr": (0.58, "Running OCR…"),
     "clip": (0.68, "Embedding frames (visual encoder)…"),
-    "visual": (0.68, "Embedding frames (Qwen-VL)…"),
-    "bge_transcript": (0.78, "Embedding transcript (BGE)…"),
+    "visual": (0.68, "Embedding frames (EmbeddingGemma)…"),
+    "bge_transcript": (0.78, "Embedding transcript…"),
     "bge_ocr": (0.82, "Embedding OCR text…"),
     "scenes": (0.84, "Clustering visual scenes…"),
-    "caption": (0.90, "Captioning scenes (Qwen3-VL Instruct)…"),
-    "bge_scene": (0.96, "Embedding scene captions (BGE)…"),
+    "caption": (0.90, "Captioning scenes (Gemma 4)…"),
+    "bge_scene": (0.96, "Embedding scene captions…"),
     "save": (0.98, "Writing index…"),
     "done": (1.0, "Analyze complete."),
 }
@@ -69,7 +69,7 @@ _STAGE_UI: dict[str, tuple[float, str]] = {
 _DEFAULT_HEADER = (
     "### Ask for a moment, not a file\n"
     "Analyze one or more videos, then ask by text (voice is optional if a file has audio). "
-    "One query searches the whole archive. Mute video uses Qwen-VL + OCR."
+    "One query searches the whole archive. Mute video uses EmbeddingGemma + OCR."
 )
 
 
@@ -418,7 +418,7 @@ def launch(
                 scene_box = gr.Checkbox(
                     label="Describe scenes (X-Ray captions)",
                     value=settings.scene_caption,
-                    info="Qwen3-VL-2B-Instruct captions those scenes (BLIP fallback).",
+                    info="Gemma 4 E4B captions those scenes (BLIP fallback).",
                 )
             with gr.Row():
                 analyze_btn = gr.Button("Analyze video", variant="primary")

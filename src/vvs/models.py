@@ -94,6 +94,9 @@ class ModelCard(BaseModel):
     caption: str | None = None
     shot: str | None = None
     visual_dim: int | None = None
+    # Width of the text collection. Optional so BGE indexes (384-d) still
+    # validate; missing values are inferred from `text` in `text_dim`.
+    text_dim: int | None = None
     # Which encoder family wrote the visual store. Width cannot answer this:
     # WeMM-2B and Qwen-VL-2B are both 2048-d. Optional so pre-existing indexes
     # still validate; they fall back to name/width inference in `encoder_kind`.

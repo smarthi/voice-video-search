@@ -39,12 +39,12 @@ source → video.mp4
       → optional TransNetV2 shots → 1 still / shot (+ 8s floor in long takes)
       → else keyframes (2 fps + dHash + 4s floor)
       → L1 motion + luma flash on the same decode (force-keep lightning)
-      → Qwen3-VL-Embedding-2B → vvs_visual (video_id-tagged rows in the shared index)
-      → RapidOCR       → BGE-small   → vvs_text (video_id-tagged rows in the shared index)
-      → Whisper ASR    → BGE-small   ↗   (only if the file has audio)
-      → scene cluster + Qwen3-VL-2B-Instruct captions → BGE ↗   (opt-in X-Ray)
+      → EmbeddingGemma 2 → vvs_visual (video_id-tagged rows in the shared index)
+      → RapidOCR       → EmbeddingGemma 2 → vvs_text (video_id-tagged rows in the shared index)
+      → Whisper ASR    → EmbeddingGemma 2 ↗   (only if the file has audio)
+      → scene cluster + Gemma 4 E4B captions → EmbeddingGemma 2 ↗   (opt-in X-Ray)
 
-query  → Qwen-VL text + BGE query
+query  → EmbeddingGemma text (frames and transcript / OCR / captions)
       → k-NN each collection, filtered to this video's rows (or every video for an archive search)
       → lexical boost when a rare query word appears in transcript / OCR / caption
       → reciprocal rank fusion onto a still (per video; UI confidence)
@@ -54,9 +54,9 @@ query  → Qwen-VL text + BGE query
       → play clip from that video + original still + confidence
 ```
 
-**Why two indexes.** Qwen-VL (2048-d for the 2B model) and BGE (384-d) are different embedding spaces, and OpenSearch's `knn_vector` field has one fixed width per index — visual frames and text are never mixed in one collection. Both collections are shared across the whole archive, distinguished by a `video_id` field on every row, not one file per video. See [`retrieve/opensearch_store.py`](src/vvs/retrieve/opensearch_store.py) for why (and its one real limitation: a shared index can't mix visual encoders of different widths).
+**Why two indexes.** Frame embeddings and text embeddings are searched as separate channels (visual vs transcript / OCR / caption) and fused later, so they stay in two collections even though EmbeddingGemma 2 writes both at the same width (768-d by default). OpenSearch's `knn_vector` field has one fixed width per index. Both collections are shared across the whole archive, distinguished by a `video_id` field on every row, not one file per video. See [`retrieve/opensearch_store.py`](src/vvs/retrieve/opensearch_store.py) for why (and its one real limitation: a shared index can't mix encoders of different widths — a 384-d BGE text index and a 768-d EmbeddingGemma text index cannot share `vvs_text`).
 
-**Visual encoder.** Default is `Qwen/Qwen3-VL-Embedding-2B` (shared image/text space, 2048-d). Official VL embedding sizes are **2B** and **8B** only — there is no Qwen-VL-Embedding-4B (`Qwen3-Embedding-4B` is text-only). `VVS_VISUAL_MODEL=qwen-vl-emb-4B` aliases to the 2B VL model and logs that. CLIP ViT-B-32 remains available via `VVS_VISUAL_ENCODER=clip` so existing 512-d indexes still search. Switching encoder requires **Re-analyze**.
+**Visual and text encoder.** Default for both is `google/embeddinggemma-2` (shared text/image/video space, 768-d). Video retrieval embeds each keyframe as an image, so a hit still has a timestamp. Text passages (transcript, OCR, scene captions) use the Document prompt; queries use SearchQuery. `VVS_VISUAL_MODEL=google/embeddinggemma2` aliases to the official id. Matryoshka widths are 128, 256, 512, and 768 (`VVS_VISUAL_TRUNCATE_DIM`); the text index uses the same width. The model runs in bfloat16 on CUDA when the GPU supports it, otherwise float32 — never float16. Qwen3-VL-Embedding, WeMM, and CLIP remain available via `VVS_VISUAL_ENCODER` so older indexes still search. An index whose `models.text` is BGE-small is still queried with BGE. Switching encoder requires **Re-analyze**, and a new width needs a fresh OpenSearch index.
 
 **WeMM as an alternative encoder.** `VVS_VISUAL_ENCODER=wemm` selects the WeMM
 embedding family (`wemm-2b` 2048-d, `wemm-4b` 2560-d, `wemm-9b` 4096-d), which
@@ -347,12 +347,9 @@ Picture path and spoken path **compete**, they are not summed. BGE-small cosine 
 
 **`VectorStore` and OpenSearch.** The app talks only to a `VectorStore` (`create`, `add`, `search`, `close`) — see `retrieve/store.py`. `OpenSearchStore` (`retrieve/opensearch_store.py`) is the only implementation: two shared indexes, `vvs_visual` and `vvs_text`, across the whole archive, each row tagged with `video_id`. `podman compose up -d` runs a single local node; `docs/CONFLUENCE_ONPREM.md` §6–8 covers the sharded-cluster version of the same document shape.
 
-**Query expansion.** Qwen-VL's dual encoder is lexically brittle: “river” and
-“running water” can land in noticeably different places in embedding space
-despite meaning the same thing to a person. Before embedding, `expand_query_terms()`
-(`media/caption.py`) asks the already-loaded Qwen3-VL-2B-Instruct model — same
-bundle X-Ray captions use, a text-only prompt this time, no second model
-download — for `VVS_QUERY_EXPAND_VARIANTS` (default 2) alternate phrasings.
+**Query expansion.** Before embedding, `expand_query_terms()`
+(`media/caption.py`) asks Gemma 4 E4B — the same checkpoint X-Ray captions use,
+text-only this time — for `VVS_QUERY_EXPAND_VARIANTS` (default 2) alternate phrasings.
 The original query plus its expansions are embedded in one batched call and
 k-NN searched individually, then merged by **max score per candidate** — every
 list here is the same ANN space, so max is the right merge, unlike the
@@ -388,7 +385,7 @@ The floor is measured, not picked. Over 21 videos, ten queries written from what
 
 `MIN_RELEVANCE = 2.7` sits in that gap with roughly 0.2 of headroom either side, and separates all twenty. Worth noting *why* the gap exists: on a nonsense query the visual channel still scores 1.25–1.42 and the caption channel 1.75–2.13, so neither channel alone would separate anything — it is their combination through `corpus_relevance` that does. The floor also trims weak tail hits inside an otherwise good result set, so a strong query can legitimately return fewer than `top_k` (`waterfall in a mossy forest` returns one). `VVS_MIN_RELEVANCE=0` restores the old always-answer behaviour. The number is calibrated on this archive's shape and wants re-measuring on a corpus of a different one.
 
-**X-Ray scene cards.** The visual embedder does not write English. When captions are on, stills are grouped (TransNet shots if present, else embedding cosine / dHash, 24 s cap). **Qwen3-VL-2B-Instruct** captions the representative still and lists objects (`VVS_SCENE_CAPTION_MODEL=qwen_vl`). That is a second checkpoint from the embedder — Instruct generates text; Embedding only writes vectors. **BLIP-base** is the fallback if Instruct fails, and the run falls back **once** rather than once per scene. Cards live in `meta.json` and are BGE-embedded as `modality="scene"`. Query time only does a playhead lookup plus ANN — the captioner does not run again.
+**X-Ray scene cards.** The visual embedder does not write English. When captions are on, stills are grouped (TransNet shots if present, else embedding cosine / dHash, 24 s cap). **Gemma 4 E4B** captions the representative still and lists objects (`VVS_SCENE_CAPTION_MODEL=gemma4`). That checkpoint only generates text; EmbeddingGemma writes the vectors. **BLIP-base** is the fallback if Gemma fails, and the run falls back **once** rather than once per scene. Cards live in `meta.json` and are EmbeddingGemma-embedded as `modality="scene"`. Query time only does a playhead lookup plus ANN — the captioner does not run again.
 
 Captioning uses the same device and precision as the embedder (see **Device** above), which matters more here than anywhere else: captioning is autoregressive, so each scene costs up to `QWEN_MAX_TOKENS` sequential forward passes rather than the single pass an embedding needs. If a caption model fails to load on the GPU, the session pins itself to CPU exactly as the encoder does.
 
@@ -396,7 +393,7 @@ Captioning uses the same device and precision as the embedder (see **Device** ab
 
 TransNetV2 is **shot-boundary** detection (cuts / fades), not semantic “this is a concert.” Object crops (`segment_id`) are a later pass on these stills, not on every raw frame.
 
-**Later, on a larger server: N-frame VLM windows.** `Qwen3-VL-Embedding` already accepts video (`{"video": frames, "fps": 4, "max_frames": 8}`), not only a still. This laptop path does **not** call that — one JPEG per vector, plus the L1/luma sidecar. When a GPU or a bigger CPU box is available, encode a short window around each kept still (about 1 s, 6–8 frames) into the **same** 2048-d `vvs_visual` index. Then `moving tornado` can match motion in the pixels. Do not embed the whole `video.mp4` as one vector (the playhead disappears). Lightning still needs the force-keep so the strike is inside the window. That pass is opt-in and needs **Re-analyze**; it is not on this CPU prototype.
+**Later, on a larger server: N-frame windows.** EmbeddingGemma 2 already accepts video (`{"video": path}`), not only a still. This path does **not** call that — one JPEG per vector, plus the L1/luma sidecar. When a GPU or a bigger CPU box is available, encode a short window around each kept still (about 1 s, 6–8 frames) into the **same** 768-d `vvs_visual` index. Then `moving tornado` can match motion in the pixels. Do not embed the whole `video.mp4` as one vector (the playhead disappears). Lightning still needs the force-keep so the strike is inside the window. That pass is opt-in and needs **Re-analyze**; it is not on this prototype.
 
 ## How to run
 
@@ -405,7 +402,7 @@ TransNetV2 is **shot-boundary** detection (cuts / fades), not semantic “this i
 ```bash
 cd video-voice-search
 uv sync
-podman compose up -d   # starts a local single-node OpenSearch on :9200
+podman compose up -d opensearch-gemma   # EmbeddingGemma node on :9210 (leaves :9200 alone)
 ```
 
 `docker compose up -d` runs the same file unchanged; the image is fully
@@ -474,7 +471,7 @@ Either move it across once (`tar` the volume out through a throwaway
 container and back in under the name `<project>_vvs-opensearch-data`) or
 re-run `scripts/reindex_local.py`.
 
-Needs Python 3.12+, `uv`, podman or Docker, ~8 GB RAM (Qwen-VL embedding 2B is heavier than CLIP; Instruct captioning loads a second 2B VL). First run needs network for Qwen-VL Embedding / BGE / RapidOCR, plus Whisper (if audio), TransNetV2, and Qwen3-VL-Instruct (or BLIP) if captions are on. After that, query is offline (OpenSearch itself needs no network once its image is pulled). CLIP indexes built before the Qwen-VL swap still search; new analyzes use Qwen-VL. `VVS_OPENSEARCH_URL` points at a different instance if you're not running the bundled compose file.
+Needs Python 3.12+, `uv`, podman or Docker, ~8 GB RAM (EmbeddingGemma 2 is about 740M parameters with the vision tower; scene captions load Gemma 4 E4B). First run needs network for `google/embeddinggemma-2`, `google/gemma-4-E4B-it`, and RapidOCR, plus Whisper (if audio) and TransNetV2. BLIP is downloaded only if Gemma captioning fails. After that, query is offline (OpenSearch itself needs no network once its image is pulled). Indexes built with Qwen-VL, WeMM, CLIP, or BGE still search; new analyzes use EmbeddingGemma for frames and text. `VVS_OPENSEARCH_URL` points at a different instance if you're not running the bundled compose file. A new vector width cannot be written into an existing `vvs_visual` or `vvs_text` index — drop those indexes (or point at a fresh OpenSearch) before the first EmbeddingGemma analyze.
 
 ### Live demo UI
 
@@ -485,7 +482,7 @@ uv run vvs app
 Open the printed `http://127.0.0.1:7860` URL from Windows. Then:
 
 1. Paste a YouTube URL or local path, or upload `.mp4` / `.webm` / `.mkv` / `.mov` / `.avi` / `.m4v`.
-2. Optional analyze options (independent — check **both** to run in one pass): **Group shots with TransNetV2**, then **Describe scenes** (Qwen3-VL-2B-Instruct captions those shot-grouped scenes).
+2. Optional analyze options (independent — check **both** to run in one pass): **Group shots with TransNetV2**, then **Describe scenes** (Gemma 4 E4B captions those shot-grouped scenes).
 3. Click **Analyze video**. Repeat for a second title if you want archive hits from more than one file — or use **01b · Bulk analyze** to paste/upload several at once (see below).
 4. Type a question → **Search**. That query searches **every** indexed video. Clips are labeled by title. Mic is optional and only useful when a file has speech.
 
@@ -647,7 +644,7 @@ Outputs in `data/<video_id>/`:
 | `meta.json.bak` | Previous `meta.json`, rotated on every write. Read only when the primary will not parse |
 | `timings.json` | Stage seconds |
 
-The vectors and their payload (`asset_id`, `shot_id`, path, `t_s`, `text`, `motion_energy`, `flash_energy`) are **not** under `data/`: they live in OpenSearch, in the shared `vvs_visual` (Qwen-VL) and `vvs_text` (BGE: OCR / transcript / scene) indexes, one row per video per still or text observation, filtered by `video_id`. Deleting `data/<video_id>/` alone leaves those rows behind — use `vvs`'s delete flow (UI **Delete**, or `delete_index()`), which purges both.
+The vectors and their payload (`asset_id`, `shot_id`, path, `t_s`, `text`, `motion_energy`, `flash_energy`) are **not** under `data/`: they live in OpenSearch, in the shared `vvs_visual` and `vvs_text` indexes (EmbeddingGemma 2 by default: frames in visual, OCR / transcript / scene in text), one row per video per still or text observation, filtered by `video_id`. Deleting `data/<video_id>/` alone leaves those rows behind — use `vvs`'s delete flow (UI **Delete**, or `delete_index()`), which purges both.
 
 ## Package layout
 
@@ -670,21 +667,21 @@ Commands: `uv run vvs index|query|app|warm|list`.
 | `VVS_SOURCE` / `VVS_VIDEO_ID` | Optional CLI / UI prefill |
 | `VVS_DATA_DIR` | Index root (default `data/`) |
 | `VVS_HOST` / `VVS_PORT` | Gradio bind (default `0.0.0.0:7860`) |
-| `VVS_OPENSEARCH_URL` | OpenSearch endpoint (default `http://localhost:9200`; `podman compose up -d` starts one) |
+| `VVS_OPENSEARCH_URL` | OpenSearch endpoint (default `http://localhost:9210`; `podman compose up -d opensearch-gemma` starts it). `:9200` is the previous encoder's cluster |
 | `VVS_OPENSEARCH_TIMEOUT_S` | Client request timeout (default `10`) |
 | `VVS_FORCE_MUTE` | Skip Whisper even if the file has audio |
 | `VVS_SCENE_CAPTION` | Caption visual scenes at analyze (X-Ray metadata) |
-| `VVS_SCENE_CAPTION_MODEL` | `qwen_vl` (default, Qwen3-VL-2B-Instruct) or `blip` |
+| `VVS_SCENE_CAPTION_MODEL` | `gemma4` (default, google/gemma-4-E4B-it) or `blip` |
 | `VVS_QUERY_EXPAND` | Query-time LLM phrasing expansion (default on); `0` disables it |
 | `VVS_QUERY_EXPAND_VARIANTS` | Alternate phrasings to generate per query (default `2`) |
 | `VVS_SHOT_DETECT` | TransNetV2 shot grouping; embed representatives only |
 | `VVS_SHOT_THRESHOLD` | Cut threshold (default `0.5`) |
 | `VVS_SHOT_MAX_GAP_S` | Extra still every N seconds inside a long shot (default `8`) |
-| `VVS_VISUAL_ENCODER` | `qwen_vl` (default), `wemm`, or `clip` (old 512-d indexes) |
-| `VVS_VISUAL_MODEL` | HF id or alias (`qwen-vl-emb-4B` → official 2B VL; `8b` → 8B; `wemm-2b` / `wemm-4b` / `wemm-9b`) |
-| `VVS_VISUAL_TRUNCATE_DIM` | Matryoshka width for WeMM only; must be a supported dim |
+| `VVS_VISUAL_ENCODER` | `embeddinggemma` (default), `qwen_vl`, `wemm`, or `clip` (old 512-d indexes) |
+| `VVS_VISUAL_MODEL` | HF id or alias (`embeddinggemma2` / `google/embeddinggemma2` → `google/embeddinggemma-2`; `qwen-vl-emb-4B` → official 2B VL; `8b` → 8B; `wemm-2b` / `wemm-4b` / `wemm-9b`) |
+| `VVS_VISUAL_TRUNCATE_DIM` | Matryoshka width. EmbeddingGemma: 128/256/512/768 (text index follows). WeMM: its supported widths |
 | `VVS_DEVICE` | `mps`, `cuda`, or `cpu`. Default auto-detects (mps → cuda → cpu) |
-| `VVS_VISUAL_DTYPE` | `float16`, `bfloat16`, `float32`. Default fp16 on GPU, fp32 on CPU |
+| `VVS_VISUAL_DTYPE` | `float16`, `bfloat16`, `float32`. Qwen/WeMM default fp16 on GPU, fp32 on CPU. EmbeddingGemma 2 ignores float16 and uses bfloat16 on CUDA when supported, else float32 |
 | `VVS_VISUAL_BATCH` | Frames per forward pass. Default 8 on GPU, 1 on CPU. Measure with `scripts/bench_batch.py` |
 | `VVS_EVICT_MODELS` | `1` / `0` to force unloading one 2B model before loading the other. Default: on below 16 GB of device memory |
 | `VVS_SHOT_DEVICE` | Device for TransNetV2. Default: the shared device choice |

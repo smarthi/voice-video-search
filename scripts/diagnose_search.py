@@ -99,10 +99,10 @@ def main() -> int:
     print(f"[diag]     shape={qv.shape}", flush=True)
     ok(t)
 
-    t = step("embed the query with BGE")
-    from vvs.retrieve.embed import embed_bge_texts
+    t = step("embed the query with EmbeddingGemma")
+    from vvs.retrieve.embed import embed_text_query
 
-    print(f"[diag]     shape={embed_bge_texts([query]).shape}", flush=True)
+    print(f"[diag]     shape={embed_text_query(query).shape}", flush=True)
     ok(t)
 
     for vid in ids:

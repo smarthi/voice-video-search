@@ -37,7 +37,9 @@ def _fresh_index() -> str:
 def _drop_index(index: str) -> None:
     from opensearchpy import OpenSearch
 
-    OpenSearch(hosts=["http://localhost:9200"]).indices.delete(index=index, ignore=[404])
+    from vvs.config import load_settings
+
+    OpenSearch(hosts=[load_settings().opensearch_url]).indices.delete(index=index, ignore=[404])
 
 
 def test_force_mute_skips_asr() -> None:

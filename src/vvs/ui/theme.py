@@ -101,7 +101,7 @@ TOPBAR_HTML = """
   </div>
   <div class="sl-pills">
     <span class="sl-pill"><i class="sl-dot on"></i>Local</span>
-    <span class="sl-pill"><i class="sl-dot ice"></i>Qwen-VL · BGE · OCR</span>
+    <span class="sl-pill"><i class="sl-dot ice"></i>EmbeddingGemma · OCR</span>
   </div>
 </div>
 """

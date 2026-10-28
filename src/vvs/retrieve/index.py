@@ -39,10 +39,12 @@ from vvs.paths import (
     write_json_atomic,
 )
 from vvs.retrieve.embed import (
-    embed_bge_texts,
     embed_clip_images,
+    embed_text_passages,
     encoder_kind,
     release_visual_encoder,
+    text_dim,
+    text_model_label,
     visual_dim,
     visual_model_label,
 )
@@ -170,23 +172,24 @@ def build_index(
     frame_vecs = embed_clip_images([frame.path for frame in frames], settings=settings)
     timings.clip_embed_s = perf_counter() - t0
 
-    transcript_vecs = np.zeros((0, 384), dtype=np.float32)
+    tdim = text_dim(settings=settings)
+    transcript_vecs = np.zeros((0, tdim), dtype=np.float32)
     if segments:
         report("bge_transcript")
         t0 = perf_counter()
-        transcript_vecs = embed_bge_texts([seg.text for seg in segments])
+        transcript_vecs = embed_text_passages([seg.text for seg in segments], settings=settings)
         timings.bge_transcript_s = perf_counter() - t0
 
-    ocr_vecs = np.zeros((0, 384), dtype=np.float32)
+    ocr_vecs = np.zeros((0, tdim), dtype=np.float32)
     if ocr_obs:
         report("bge_ocr")
         t0 = perf_counter()
-        ocr_vecs = embed_bge_texts([row.text for row in ocr_obs])
+        ocr_vecs = embed_text_passages([row.text for row in ocr_obs], settings=settings)
         timings.bge_ocr_s = perf_counter() - t0
 
     duration_s = float(ingest_info.duration_s or _duration(media, frames, segments))
     scenes: list[SceneCard] = []
-    scene_vecs = np.zeros((0, 384), dtype=np.float32)
+    scene_vecs = np.zeros((0, tdim), dtype=np.float32)
     caption_model: str | None = None
     if want_scenes:
         report("scenes")
@@ -219,7 +222,9 @@ def build_index(
         if scenes:
             report("bge_scene")
             t0 = perf_counter()
-            scene_vecs = embed_bge_texts([scene.passage_text() for scene in scenes])
+            scene_vecs = embed_text_passages(
+                [scene.passage_text() for scene in scenes], settings=settings
+            )
             timings.bge_scene_s = perf_counter() - t0
 
     report("save")
@@ -262,7 +267,8 @@ def build_index(
         models=ModelCard(
             clip=visual_model_label(settings=settings),
             asr="faster-whisper small int8" if segments else "skipped (no audio track)",
-            text="BAAI/bge-small-en-v1.5",
+            text=text_model_label(),
+            text_dim=text_dim(settings=settings),
             ocr="rapidocr-onnxruntime" if ocr_obs else None,
             caption=caption_model,
             shot="TransNetV2" if shots else None,
@@ -303,9 +309,9 @@ _TIMING_LABELS = (
     ("scenes_s", "scenes"),
     ("caption_s", "caption"),
     ("clip_embed_s", "visual embed"),
-    ("bge_transcript_s", "BGE transcript"),
-    ("bge_ocr_s", "BGE OCR"),
-    ("bge_scene_s", "BGE scene"),
+    ("bge_transcript_s", "text transcript"),
+    ("bge_ocr_s", "text OCR"),
+    ("bge_scene_s", "text scene"),
     ("total_s", "total"),
 )
 
@@ -350,13 +356,18 @@ def load_index(video_id: str) -> dict[str, Any]:
     text_probe = open_store(
         video_id,
         "text",
-        dim=384,
+        dim=text_dim(meta=meta),
         settings=settings,
         create=False,
         generation=meta.index_generation,
     )
     if text_probe.ntotal() > 0:
         text = text_probe
+        mapped = int(text.dim or 0)
+        if mapped and meta.models.text_dim != mapped:
+            meta.models.text_dim = mapped
+            write_json_atomic(meta_path(video_id), meta.model_dump_json(indent=2))
+            print(f"[index] healed {video_id} meta text_dim={mapped}")
     return {
         "video_id": video_id,
         "meta": meta,
@@ -450,8 +461,9 @@ def _write_stores(
             text_rows.append(vec)
     if not text_payloads:
         return
+    tdim = int(text_rows[0].shape[0]) if text_rows else text_dim(settings=settings)
     text = open_store(
-        vid, "text", dim=384, settings=settings, create=True, generation=generation
+        vid, "text", dim=tdim, settings=settings, create=True, generation=generation
     )
     try:
         text.add(np.vstack(text_rows), text_payloads)

@@ -7,14 +7,15 @@ same place, distinguished by a `video_id` field on each document. This is the
 storage shape `docs/CONFLUENCE_ONPREM.md` describes (one shared index, not one
 per asset), scaled down to a single local node instead of a sharded cluster.
 
-Two collections, not one, because visual and text embeddings are different
-widths (the visual encoder's dimension vs. BGE's fixed 384) and OpenSearch's
-`knn_vector` field has one fixed dimension per index -- mixing widths in one
-index is not possible. A consequence worth knowing: unlike the old per-video
-FAISS files, this shared index locks in whichever visual encoder wrote it
-first. Switching visual encoders (e.g. CLIP 512-d -> Qwen-VL 2048-d) once the
-archive is non-empty requires a fresh index, not a mixed one -- `create()`
-raises rather than silently corrupting the mapping.
+Two collections, not one, because the visual and text channels are searched
+separately and may have different widths (EmbeddingGemma's dimension vs. an
+older BGE index's fixed 384) and OpenSearch's `knn_vector` field has one fixed
+dimension per index -- mixing widths in one index is not possible. A
+consequence worth knowing: unlike the old per-video FAISS files, this shared
+index locks in whichever encoder wrote it first. Switching encoders (e.g. BGE
+384-d -> EmbeddingGemma 768-d) once the archive is non-empty requires a fresh
+index, not a mixed one -- `create()` raises rather than silently corrupting
+the mapping.
 
 `search()` uses OpenSearch's efficient inline k-NN filter (Lucene HNSW,
 available since OpenSearch 2.4). Filtering occurs during candidate retrieval,
@@ -25,8 +26,8 @@ type fuses k-NN and BM25 scores server-side via a search pipeline, but doing
 so would discard the separate per-channel ranks (visual vs. transcript vs.
 OCR vs. scene) that `retrieve/search.py`'s RRF fusion, temporal boosts, and
 motion/flash heuristics depend on. Both collections here are searched with
-k-NN only (the text collection embeds OCR/transcript/scene text with BGE, same
-as before), which is why `retrieve/search.py` needed no changes at all --
+k-NN only (the text collection embeds OCR/transcript/scene text with
+EmbeddingGemma 2, or BGE when the index was written that way), which is why `retrieve/search.py` needed no changes at all --
 this module is a drop-in for `FaissStore` against the same `VectorStore`
 surface.
 """

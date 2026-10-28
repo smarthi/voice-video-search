@@ -1,9 +1,10 @@
 """Scene captioner (ingest) and query expansion (search), sharing one model.
 
-Primary: Qwen3-VL-2B-Instruct (caption + object list at ingest; text-only
-phrasing rewrite at query time). Fallback for captioning only: BLIP-base --
-BLIP cannot do text-only generation, so a query-expansion failure has no
-fallback and simply skips expansion (see `expand_query_terms`).
+Primary: Gemma 4 E4B Instruct (caption + object list at ingest; text-only
+phrasing rewrite at query time). Thinking is off: these calls are short.
+Fallback for captioning only: BLIP-base. BLIP cannot do text-only generation,
+so a query-expansion failure has no fallback and simply skips expansion
+(see `expand_query_terms`).
 """
 
 from __future__ import annotations
@@ -20,18 +21,17 @@ from vvs.device import (
     empty_cache,
     force_cpu,
     resolve_device,
-    resolve_dtype,
     to_device,
     torch_dtype,
 )
 from vvs.media.scenes import SceneDraft, drafts_to_cards
 from vvs.models import Keyframe, SceneCard
 
-QWEN_CAPTION_ID = "Qwen/Qwen3-VL-2B-Instruct"
+GEMMA_CAPTION_ID = "google/gemma-4-E4B-it"
 BLIP_ID = "Salesforce/blip-image-captioning-base"
 MAX_SIDE = 768
 CAPTION_MAX_TOKENS = 32
-QWEN_MAX_TOKENS = 80
+GEMMA_MAX_TOKENS = 80
 EXPAND_MAX_TOKENS = 60
 _CAPTION_PROMPT = (
     "Describe this video frame in one short English sentence. "
@@ -46,11 +46,11 @@ _EXPAND_PROMPT = (
     "do not repeat the original wording."
 )
 _LEADING_MARKER = re.compile(r"^[\s\-*\d.)]+")
-_qwen_disabled: str | None = None
-# Separate from _qwen_disabled: a text-only rewrite call can fail in a way an
+_gemma_disabled: str | None = None
+# Separate from _gemma_disabled: a text-only rewrite call can fail in a way an
 # image+text caption call would not (or vice versa), so one usage failing
 # should not silently disable the other for the rest of the process.
-_qwen_expand_disabled: str | None = None
+_gemma_expand_disabled: str | None = None
 
 
 CaptionFn = Callable[[str], tuple[str, list[str], str]]
@@ -63,7 +63,7 @@ def release_captioner() -> None:
     about to want the same card. Also covers the case where this process is a
     long-lived UI that captioned or expanded a query earlier.
     """
-    _qwen_bundle.cache_clear()
+    _gemma_bundle.cache_clear()
     _blip_bundle.cache_clear()
     empty_cache()
     print("[caption] released the captioner")
@@ -97,28 +97,30 @@ def caption_scenes(
 
 def caption_image(path: str | Path, *, model_name: str | None = None) -> tuple[str, list[str], str]:
     """Return (caption, objects, model_id) for one still."""
-    global _qwen_disabled
-    preferred = (model_name or load_settings().scene_caption_model or "qwen_vl").strip()
+    global _gemma_disabled
+    preferred = (model_name or load_settings().scene_caption_model or "gemma4").strip()
     image = _open_fit(path)
-    key = preferred.lower().replace("_", "-")
-    if _want_qwen(key) and _qwen_disabled is None:
+    if _want_gemma(preferred) and _gemma_disabled is None:
         try:
-            return _qwen_caption(image)
+            return _gemma_caption(image)
         except Exception as exc:
-            _qwen_disabled = str(exc)
-            print(f"[caption] Qwen-VL Instruct failed ({exc}); falling back to BLIP for this run")
+            _gemma_disabled = str(exc)
+            print(f"[caption] Gemma 4 failed ({exc}); falling back to BLIP for this run")
     return _blip_caption(image)
 
 
-def _want_qwen(name: str) -> bool:
+def _want_gemma(name: str) -> bool:
+    """Anything other than an explicit BLIP request uses Gemma 4.
+
+    `qwen_vl` is included so an old `VVS_SCENE_CAPTION_MODEL` value does not
+    silently drop to BLIP.
+    """
     key = (name or "").lower().replace("_", "-")
-    if key in {"qwen", "qwen-vl", "qwen3", "qwen3-vl", "qwen-vl-instruct"}:
-        return True
-    return "qwen3-vl" in key and "instruct" in key
+    return key not in {"blip", "blip-base"} and "blip" not in key
 
 
-def parse_qwen_caption(text: str) -> tuple[str, list[str]]:
-    """Split Instruct output into (caption, objects). Used by tests without a VLM."""
+def parse_scene_caption(text: str) -> tuple[str, list[str]]:
+    """Split captioner output into (caption, objects). Used by tests without a VLM."""
     raw = (text or "").strip()
     if not raw:
         return "A video frame.", []
@@ -143,16 +145,35 @@ def parse_qwen_caption(text: str) -> tuple[str, list[str]]:
     return caption or "A video frame.", objects
 
 
-@lru_cache(maxsize=1)
-def _qwen_bundle():
-    from transformers import AutoModelForImageTextToText, AutoProcessor
+parse_qwen_caption = parse_scene_caption
 
-    processor = AutoProcessor.from_pretrained(QWEN_CAPTION_ID)
+
+def _caption_dtype(device: str) -> str:
+    """bfloat16 on CUDA, float32 elsewhere. Gemma 4 is not run in float16."""
+    dev = (device or "cpu").strip().lower()
+    if dev == "cuda":
+        import torch
+
+        if torch.cuda.is_bf16_supported():
+            return "bfloat16"
+    return "float32"
+
+
+@lru_cache(maxsize=1)
+def _gemma_bundle():
+    from transformers import AutoConfig, AutoModelForMultimodalLM, AutoProcessor
+
+    processor = AutoProcessor.from_pretrained(GEMMA_CAPTION_ID)
+    config = AutoConfig.from_pretrained(GEMMA_CAPTION_ID)
+    # Captions and query rewrites never use audio. Dropping the tower keeps
+    # the 8 GB card for the text and vision weights.
+    config.audio_config = None
 
     def load(device: str, dtype: str):
-        print(f"[caption] loading {QWEN_CAPTION_ID} ({device}, {dtype}, Qwen3-VL Instruct)")
-        model = AutoModelForImageTextToText.from_pretrained(
-            QWEN_CAPTION_ID,
+        print(f"[caption] loading {GEMMA_CAPTION_ID} ({device}, {dtype})")
+        model = AutoModelForMultimodalLM.from_pretrained(
+            GEMMA_CAPTION_ID,
+            config=config,
             dtype=torch_dtype(dtype),
             low_cpu_mem_usage=True,
         )
@@ -162,19 +183,49 @@ def _qwen_bundle():
 
     device = resolve_device()
     try:
-        return load(device, resolve_dtype(device)), processor
+        return load(device, _caption_dtype(device)), processor
     except Exception as exc:
         if device == "cpu":
             raise
         print(f"[caption] {device} load failed ({type(exc).__name__}: {exc}); using cpu")
         force_cpu()
-        return load("cpu", resolve_dtype("cpu")), processor
+        return load("cpu", _caption_dtype("cpu")), processor
 
 
-def _qwen_caption(image: Image.Image) -> tuple[str, list[str], str]:
+def _gemma_generate(messages: list[dict], max_new_tokens: int) -> str:
     import torch
 
-    model, processor = _qwen_bundle()
+    model, processor = _gemma_bundle()
+    inputs = processor.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        return_dict=True,
+        return_tensors="pt",
+        enable_thinking=False,
+    )
+    inputs = to_device(inputs, resolve_device())
+    with torch.no_grad():
+        generated = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            use_cache=True,
+        )
+    in_len = int(inputs["input_ids"].shape[1])
+    trimmed = generated[:, in_len:]
+    decoded = processor.batch_decode(
+        trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+    )[0]
+    parsed = processor.parse_response(decoded)
+    if isinstance(parsed, dict):
+        content = parsed.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+    return decoded.strip()
+
+
+def _gemma_caption(image: Image.Image) -> tuple[str, list[str], str]:
     messages = [
         {
             "role": "user",
@@ -184,49 +235,15 @@ def _qwen_caption(image: Image.Image) -> tuple[str, list[str], str]:
             ],
         }
     ]
-    try:
-        inputs = processor.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_dict=True,
-            return_tensors="pt",
-        )
-    except Exception:
-        from qwen_vl_utils import process_vision_info
-
-        text = processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        image_inputs, video_inputs = process_vision_info(messages)
-        inputs = processor(
-            text=[text],
-            images=image_inputs,
-            videos=video_inputs,
-            padding=True,
-            return_tensors="pt",
-        )
-    inputs = to_device(inputs, resolve_device())
-    with torch.no_grad():
-        generated = model.generate(
-            **inputs,
-            max_new_tokens=QWEN_MAX_TOKENS,
-            do_sample=False,
-            use_cache=True,
-        )
-    in_len = int(inputs["input_ids"].shape[1])
-    trimmed = generated[:, in_len:]
-    decoded = processor.batch_decode(
-        trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
-    )[0]
-    caption, objects = parse_qwen_caption(decoded)
-    return caption, objects, QWEN_CAPTION_ID
+    decoded = _gemma_generate(messages, GEMMA_MAX_TOKENS)
+    caption, objects = parse_scene_caption(decoded)
+    return caption, objects, GEMMA_CAPTION_ID
 
 
 def expand_query_terms(query: str, *, max_variants: int | None = None) -> list[str]:
     """Alternate phrasings of `query`'s visual subject, for a wider ANN net.
 
-    Dual encoders like Qwen-VL are lexically brittle: "river" and "running
+    Embedding models are lexically brittle: "river" and "running
     water" can land in noticeably different places in embedding space even
     though they mean the same thing to a person. `retrieve/search.py` embeds
     each returned phrasing too and merges the candidates by max score, so a
@@ -240,9 +257,9 @@ def expand_query_terms(query: str, *, max_variants: int | None = None) -> list[s
     produced nothing usable. There is no fallback model here the way BLIP
     backs up captioning -- BLIP cannot do text-only generation.
     """
-    global _qwen_expand_disabled
+    global _gemma_expand_disabled
     query = (query or "").strip()
-    if not query or _qwen_expand_disabled is not None:
+    if not query or _gemma_expand_disabled is not None:
         return []
     settings = load_settings()
     if not settings.query_expand:
@@ -251,40 +268,18 @@ def expand_query_terms(query: str, *, max_variants: int | None = None) -> list[s
     if n <= 0:
         return []
     try:
-        decoded = _qwen_rewrite(_EXPAND_PROMPT.format(query=query, n=n))
+        decoded = _gemma_rewrite(_EXPAND_PROMPT.format(query=query, n=n))
     except Exception as exc:
-        _qwen_expand_disabled = str(exc)
+        _gemma_expand_disabled = str(exc)
         print(f"[query] expansion failed ({exc}); searching the literal query only")
         return []
     return _parse_expansion_lines(decoded, query, n)
 
 
-def _qwen_rewrite(prompt: str) -> str:
-    """Text-only generation through the same Qwen3-VL-Instruct bundle captioning uses."""
-    import torch
-
-    model, processor = _qwen_bundle()
+def _gemma_rewrite(prompt: str) -> str:
+    """Text-only generation through the same Gemma 4 bundle captioning uses."""
     messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
-    inputs = processor.apply_chat_template(
-        messages,
-        tokenize=True,
-        add_generation_prompt=True,
-        return_dict=True,
-        return_tensors="pt",
-    )
-    inputs = to_device(inputs, resolve_device())
-    with torch.no_grad():
-        generated = model.generate(
-            **inputs,
-            max_new_tokens=EXPAND_MAX_TOKENS,
-            do_sample=False,
-            use_cache=True,
-        )
-    in_len = int(inputs["input_ids"].shape[1])
-    trimmed = generated[:, in_len:]
-    return processor.batch_decode(
-        trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
-    )[0]
+    return _gemma_generate(messages, EXPAND_MAX_TOKENS)
 
 
 def _parse_expansion_lines(text: str, original: str, max_variants: int) -> list[str]:

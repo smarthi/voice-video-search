@@ -1,4 +1,4 @@
-"""ANN retrieval: visual encoder + BGE text (OCR / optional transcript), fused with RRF."""
+"""ANN retrieval: visual encoder + text encoder (OCR / optional transcript), fused with RRF."""
 
 from __future__ import annotations
 
@@ -13,7 +13,14 @@ from vvs.media.ocr import usable_ocr_text
 from vvs.media.scenes import scene_covering
 from vvs.media.shots import shot_covering
 from vvs.models import Hit, IndexMeta, Keyframe, OcrObservation, SceneCard, TranscriptSegment
-from vvs.retrieve.embed import embed_bge_query, embed_clip_texts, encoder_kind, visual_dim
+from vvs.retrieve.embed import (
+    embed_clip_texts,
+    embed_text_query,
+    encoder_kind,
+    text_dim,
+    uses_bge_text,
+    visual_dim,
+)
 from vvs.retrieve.index import list_indexed, load_index
 from vvs.retrieve.store import StoreHit
 
@@ -146,8 +153,12 @@ def search(
 
     text_hits: list[StoreHit] = []
     if bundle.get("text") is not None:
-        bge_q = text_query if text_query is not None else embed_bge_query(query)[0]
-        text_hits = bundle["text"].search(bge_q, top_k=max(ANN_OVERFETCH, top_k * 8))
+        text_q = text_query if text_query is not None else embed_text_query(
+            query,
+            meta=meta,
+            dim=getattr(bundle.get("text"), "dim", None) or None,
+        )[0]
+        text_hits = bundle["text"].search(text_q, top_k=max(ANN_OVERFETCH, top_k * 8))
         # search_corpus() passes the whole archive's text here so idf reflects
         # genuine rarity, not a coincidence of this one video's own document
         # count -- see LEXICAL_IDF_CAP's docstring. A standalone search() call
@@ -297,6 +308,13 @@ def search(
     return hits
 
 
+def _text_query_key(meta, store) -> tuple[str, int]:
+    """Identity of the text encoder that wrote this video, plus the stored width."""
+    width = int(getattr(store, "dim", 0) or 0) or text_dim(meta=meta)
+    backend = "bge" if uses_bge_text(meta) else "embeddinggemma"
+    return backend, width
+
+
 def search_corpus(
     query: str,
     video_ids: list[str] | None = None,
@@ -319,9 +337,9 @@ def search_corpus(
             print(f"[search] skip {vid}: {exc}")
     if not bundles:
         return []
-    # BGE is shared by every text collection. Visual indexes can legally have
-    # different model families at the same width, so cache by writer identity.
-    text_q = embed_bge_query(query)[0] if any(b.get("text") is not None for b in bundles.values()) else None
+    # Text indexes can be EmbeddingGemma (768-d) or an older BGE index (384-d).
+    # Embed once per (model, width), not once per video.
+    text_queries: dict[tuple[str, int], object] = {}
     # Expand once for the whole archive call, not once per encoder family --
     # it's a rewrite of the query text, independent of which model embeds it.
     texts = _query_texts(query)
@@ -350,6 +368,13 @@ def search_corpus(
         key = (encoder_kind(meta=meta), str(meta.models.clip or ""), visual_dim(meta=meta))
         if key not in visual_queries:
             visual_queries[key] = list(embed_clip_texts(texts, meta=meta))
+        text_q = None
+        text_store = bundle.get("text")
+        if text_store is not None:
+            text_key = _text_query_key(meta, text_store)
+            if text_key not in text_queries:
+                text_queries[text_key] = embed_text_query(query, meta=meta, dim=text_key[1])[0]
+            text_q = text_queries[text_key]
         try:
             groups.append(
                 search(

@@ -46,9 +46,76 @@ def test_qwen_vl_emb_4b_aliases_to_official_2b() -> None:
 
 
 def test_visual_dim_follows_encoder() -> None:
+    assert visual_dim(settings=Settings(visual_encoder="embeddinggemma")) == 768
     assert visual_dim(settings=Settings(visual_encoder="clip")) == 512
     assert visual_dim(settings=Settings(visual_encoder="qwen_vl", visual_model="2b")) == 2048
     assert visual_dim(settings=Settings(visual_encoder="qwen_vl", visual_model="8b")) == 4096
+
+
+def test_embeddinggemma_aliases() -> None:
+    from vvs.retrieve.embed import EMBEDDINGGEMMA
+
+    assert resolve_visual_model("google/embeddinggemma2") == EMBEDDINGGEMMA
+    assert resolve_visual_model("embeddinggemma-2") == EMBEDDINGGEMMA
+    assert resolve_visual_model("gemma2") == EMBEDDINGGEMMA
+    assert resolve_visual_model(EMBEDDINGGEMMA) == EMBEDDINGGEMMA
+
+
+def test_qwen_encoder_does_not_load_the_gemma_checkpoint() -> None:
+    """VVS_VISUAL_ENCODER=qwen_vl must not inherit the EmbeddingGemma default id."""
+    cfg = Settings(visual_encoder="qwen_vl", visual_model="google/embeddinggemma-2")
+    assert visual_dim(settings=cfg) == 2048
+    from vvs.retrieve.embed import visual_model_label
+
+    assert visual_model_label(settings=cfg) == QWEN_VL_2B
+
+
+def test_embeddinggemma_matryoshka_truncation() -> None:
+    from vvs.retrieve.embed import text_dim
+
+    cfg = Settings(
+        visual_encoder="embeddinggemma",
+        visual_model="embeddinggemma",
+        visual_truncate_dim=256,
+    )
+    assert visual_dim(settings=cfg) == 256
+    assert text_dim(settings=cfg) == 256
+
+
+def test_embeddinggemma_rejects_non_matryoshka_width() -> None:
+    cfg = Settings(
+        visual_encoder="embeddinggemma",
+        visual_model="google/embeddinggemma-2",
+        visual_truncate_dim=300,
+    )
+    try:
+        visual_dim(settings=cfg)
+    except SystemExit:
+        return
+    raise AssertionError("expected SystemExit for a width EmbeddingGemma cannot emit")
+
+
+def test_bge_text_index_keeps_384() -> None:
+    from vvs.retrieve.embed import BGE_DIM, BGE_NAME, text_dim, uses_bge_text
+
+    meta = _Meta("Qwen/Qwen3-VL-Embedding-2B", visual_dim=2048, visual_encoder="qwen_vl")
+    meta.models.text = BGE_NAME
+    assert uses_bge_text(meta)
+    assert text_dim(meta=meta) == BGE_DIM
+
+
+def test_gemma_dtype_is_never_float16() -> None:
+    from vvs.retrieve.embed import gemma_dtype
+
+    _clear_device_env()
+    assert gemma_dtype("cpu") == "float32"
+    assert gemma_dtype("mps") == "float32"
+    os.environ["VVS_VISUAL_DTYPE"] = "float16"
+    assert gemma_dtype("cpu") == "float32"
+    assert gemma_dtype("cuda") != "float16"
+    os.environ["VVS_VISUAL_DTYPE"] = "bfloat16"
+    assert gemma_dtype("cpu") == "bfloat16"
+    _clear_device_env()
 
 
 def test_old_clip_index_stays_on_clip() -> None:
@@ -131,17 +198,20 @@ def test_truncated_wemm_index_keeps_its_encoder() -> None:
 def test_kind_from_model() -> None:
     assert kind_from_model(WEMM_2B) == "wemm"
     assert kind_from_model(QWEN_VL_2B) == "qwen_vl"
+    assert kind_from_model("google/embeddinggemma-2") == "embeddinggemma"
     assert kind_from_model("open_clip ViT-B-32 laion2b_s34b_b79k") == "clip"
     assert kind_from_model("") is None
 
 
 def test_normalize_encoder_kind() -> None:
+    assert normalize_encoder_kind("embeddinggemma") == "embeddinggemma"
+    assert normalize_encoder_kind("gemma2") == "embeddinggemma"
     assert normalize_encoder_kind("wemm") == "wemm"
     assert normalize_encoder_kind("WeMM-2B") == "wemm"
     assert normalize_encoder_kind("qwen") == "qwen_vl"
     assert normalize_encoder_kind("clip") == "clip"
-    assert normalize_encoder_kind(None) == "qwen_vl"
-    assert normalize_encoder_kind("nonsense") == "qwen_vl"
+    assert normalize_encoder_kind(None) == "embeddinggemma"
+    assert normalize_encoder_kind("nonsense") == "embeddinggemma"
 
 
 def test_dtype_is_half_on_gpu_and_full_on_cpu() -> None:
@@ -302,7 +372,9 @@ def test_embed_and_caption_share_one_device_decision() -> None:
     from vvs.retrieve import embed
 
     assert embed.resolve_device is caption.resolve_device
-    assert embed.resolve_dtype is caption.resolve_dtype
+    # Gemma 4 captioning refuses float16; the visual encoder may still use it.
+    assert caption._caption_dtype("cpu") == "float32"
+    assert caption._caption_dtype("cuda") != "float16"
 
 
 def test_eviction_is_off_without_a_device_that_reports_memory() -> None:
@@ -365,8 +437,12 @@ def test_release_drops_the_cached_models_and_frees_the_allocator() -> None:
     from vvs.retrieve import embed
 
     for module, release, loaders in (
-        (embed, embed.release_visual_encoder, (embed._sentence_transformer, embed._clip_bundle)),
-        (caption, caption.release_captioner, (caption._qwen_bundle, caption._blip_bundle)),
+        (
+            embed,
+            embed.release_visual_encoder,
+            (embed._sentence_transformer, embed._embeddinggemma, embed._clip_bundle),
+        ),
+        (caption, caption.release_captioner, (caption._gemma_bundle, caption._blip_bundle)),
     ):
         called: list[bool] = []
         original = module.empty_cache

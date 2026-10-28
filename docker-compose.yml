@@ -46,5 +46,32 @@ services:
     volumes:
       - vvs-opensearch-data:/usr/share/opensearch/data
 
+  # EmbeddingGemma writes 768-d vectors. That width cannot be added to the
+  # 2048-d / 384-d indexes already living on :9200, so this is a second node
+  # with its own volume. The app on this branch talks to :9210.
+  opensearch-gemma:
+    image: docker.io/opensearchproject/opensearch:2.19.1
+    container_name: vvs-opensearch-gemma
+    restart: always
+    environment:
+      - discovery.type=single-node
+      - plugins.security.disabled=true
+      - bootstrap.memory_lock=true
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=Vvs!DevOnly1
+      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "9210:9200"
+      - "9610:9600"
+    volumes:
+      - vvs-opensearch-gemma-data:/usr/share/opensearch/data
+
 volumes:
   vvs-opensearch-data:
+  vvs-opensearch-gemma-data:

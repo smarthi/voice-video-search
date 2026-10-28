@@ -6,7 +6,7 @@ import numpy as np
 
 from vvs.media.caption import (
     _parse_expansion_lines,
-    _want_qwen,
+    _want_gemma,
     caption_scenes,
     expand_query_terms,
     parse_qwen_caption,
@@ -140,9 +140,10 @@ def test_parse_qwen_caption_splits_objects() -> None:
     assert caption == "A red car in a tunnel."
     assert objects == ["car", "tunnel", "headlights"]
     assert parse_qwen_caption("")[0] == "A video frame."
-    assert _want_qwen("qwen_vl")
-    assert _want_qwen("qwen/qwen3-vl-2b-instruct")
-    assert not _want_qwen("blip")
+    assert _want_gemma("gemma4")
+    assert _want_gemma("google/gemma-4-E4B-it")
+    assert _want_gemma("qwen_vl")
+    assert not _want_gemma("blip")
 
 
 def test_parse_expansion_lines_dedupes_and_strips_markers() -> None:

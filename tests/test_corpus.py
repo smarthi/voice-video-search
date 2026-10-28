@@ -162,7 +162,7 @@ def test_corpus_reuses_query_embeddings_per_encoder_family(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         search_module,
-        "embed_bge_query",
+        "embed_text_query",
         lambda *_a, **_kw: calls.__setitem__("text", calls["text"] + 1) or [[1.0]],
     )
     monkeypatch.setattr(
@@ -366,7 +366,7 @@ def test_search_corpus_builds_lexical_corpus_from_every_bundle() -> None:
     orig_encoder_kind = search_module.encoder_kind
     orig_visual_dim = search_module.visual_dim
     orig_embed_clip_texts = search_module.embed_clip_texts
-    orig_embed_bge_query = search_module.embed_bge_query
+    orig_embed_text_query = search_module.embed_text_query
     orig_expand = search_module.expand_query_terms
 
     def fake_search(vid, query, *, top_k, loaded, visual_queries, text_query, lexical_corpus=None):
@@ -376,7 +376,7 @@ def test_search_corpus_builds_lexical_corpus_from_every_bundle() -> None:
     search_module.encoder_kind = lambda **_kw: "fake_encoder"
     search_module.visual_dim = lambda **_kw: 8
     search_module.embed_clip_texts = lambda *_a, **_kw: [[1.0]]
-    search_module.embed_bge_query = lambda *_a, **_kw: [[1.0]]
+    search_module.embed_text_query = lambda *_a, **_kw: [[1.0]]
     search_module.expand_query_terms = lambda *_a, **_kw: []
     search_module.search = fake_search
     try:
@@ -385,7 +385,7 @@ def test_search_corpus_builds_lexical_corpus_from_every_bundle() -> None:
         search_module.encoder_kind = orig_encoder_kind
         search_module.visual_dim = orig_visual_dim
         search_module.embed_clip_texts = orig_embed_clip_texts
-        search_module.embed_bge_query = orig_embed_bge_query
+        search_module.embed_text_query = orig_embed_text_query
         search_module.expand_query_terms = orig_expand
         search_module.search = real_search
 

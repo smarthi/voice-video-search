@@ -408,9 +408,14 @@ def main(argv: list[str] | None = None) -> int:
     b = sub.add_parser("build", help="Re-embed an existing index with another encoder")
     b.add_argument("--source-id", required=True)
     b.add_argument("--dest-id", default=None)
-    b.add_argument("--encoder", default="wemm", help="wemm | qwen_vl | clip")
+    b.add_argument("--encoder", default="wemm", help="embeddinggemma | wemm | qwen_vl | clip")
     b.add_argument("--model", default=None, help="Explicit HF id or alias")
-    b.add_argument("--truncate-dim", type=int, default=None, help="WeMM Matryoshka width")
+    b.add_argument(
+        "--truncate-dim",
+        type=int,
+        default=None,
+        help="Matryoshka width (EmbeddingGemma 128/256/512/768, WeMM supported widths)",
+    )
     b.add_argument("--limit", type=int, default=None, help="Only the first N frames")
     b.add_argument("--overwrite", action="store_true")
     b.set_defaults(func=cmd_build)
